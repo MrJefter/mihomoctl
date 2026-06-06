@@ -75,15 +75,29 @@ install_mihomo() {
     tmpdir="$(mktemp -d)"
     trap 'rm -rf "${tmpdir:-}"' EXIT
 
-    local url="https://github.com/MetaCubeX/mihomo/releases/latest/download/mihomo-linux-${arch}-compatible.gz"
+    local tag
+    tag="$(curl -sL "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest" | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)"
+    if [[ -z "$tag" ]]; then
+        error "Failed to fetch latest mihomo version from GitHub"
+    fi
+
+    local url="https://github.com/MetaCubeX/mihomo/releases/download/${tag}/mihomo-linux-${arch}-compatible-${tag}.gz"
     info "Fetching: $url"
 
     if command -v wget &>/dev/null; then
-        wget -q -O "$tmpdir/mihomo.gz" "$url"
+        if ! wget -q -O "$tmpdir/mihomo.gz" "$url"; then
+            error "Download failed. Check your network or URL: $url"
+        fi
     elif command -v curl &>/dev/null; then
-        curl -sL -o "$tmpdir/mihomo.gz" "$url"
+        if ! curl -sL -o "$tmpdir/mihomo.gz" "$url"; then
+            error "Download failed. Check your network or URL: $url"
+        fi
     else
         error "Neither wget nor curl found. Install one of them."
+    fi
+
+    if [[ ! -s "$tmpdir/mihomo.gz" ]]; then
+        error "Downloaded file is empty"
     fi
 
     gunzip "$tmpdir/mihomo.gz"
