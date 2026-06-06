@@ -46,11 +46,11 @@ def need_root(action):
 
 def read_state():
     if not STATE.exists():
-        return {"mode": "tun", "group": None, "node": None}
+        return {"mode": "tun", "group": None, "node": None, "profile": None}
     try:
         return json.loads(STATE.read_text())
     except Exception:
-        return {"mode": "tun", "group": None, "node": None}
+        return {"mode": "tun", "group": None, "node": None, "profile": None}
 
 
 def write_state(state):
@@ -86,13 +86,11 @@ def generate_config():
 
     cfg = load_yaml(BASE_CFG)
 
-    # Keep Remnawave/RoscomVPN structure, override only host-side runtime knobs.
     cfg["mixed-port"] = MIXED_PORT
     cfg["allow-lan"] = False
     cfg["mode"] = cfg.get("mode", "rule")
     cfg["log-level"] = cfg.get("log-level", "info")
 
-    # Local REST API only.
     cfg["external-controller"] = "127.0.0.1:9090"
     cfg["secret"] = ""
 
@@ -113,16 +111,11 @@ def generate_config():
     tun.setdefault("auto-detect-interface", True)
     tun["strict-route"] = False
 
-    # Critical for Linux TUN mode: catch DNS from applications/systemd-resolved.
-    # Without this, TUN may be up while normal apps hang on DNS/routing.
     if mode == "tun":
         tun["dns-hijack"] = ["any:53"]
     else:
         tun.pop("dns-hijack", None)
 
-    # Do not exclude Mihomo fake-ip ranges from TUN routing.
-    # If fake IPs are excluded, apps resolve domains to 198.18.x.x
-    # and then try to connect outside the TUN, causing timeouts.
     fake_excludes = {
         "198.18.0.0/15",
         "198.18.0.0/16",
@@ -140,8 +133,6 @@ def generate_config():
 
     cfg["tun"] = tun
 
-    # Keep subscription DNS if it exists, but force the minimum required
-    # for sane TUN operation.
     cfg["ipv6"] = False
 
     dns = cfg.get("dns")
@@ -189,7 +180,6 @@ def generate_config():
         "ntp7.*.com"
     ])
 
-    # redir-host does not need fake-ip specific config.
     if dns.get("enhanced-mode") == "redir-host":
         dns.pop("fake-ip-range", None)
         dns.pop("fake-ip-filter", None)
@@ -277,23 +267,6 @@ def candidate_groups(proxies):
     return groups
 
 
-def default_group(proxies, preferred=None):
-    groups = candidate_groups(proxies)
-    if not groups:
-        die("no selectable proxy groups found")
-
-    names = [g[0] for g in groups]
-
-    if preferred and preferred in names:
-        return preferred
-
-    for p in ["PROXY", "Proxy", "proxy", "GLOBAL", "🚀 节点选择", "🔰 节点选择", "节点选择"]:
-        if p in names:
-            return p
-
-    return groups[0][0]
-
-
 def get_group_nodes(group, proxies):
     obj = proxies.get(group)
     if not is_group(obj):
@@ -311,146 +284,171 @@ def select_node(group, node):
     print(f"selected: {group} -> {node}")
 
 
-def cmd_groups(args):
-    proxies = get_proxies()
-    state = read_state()
-    current_group = state.get("group")
-
-    for name, obj, nodes in candidate_groups(proxies):
-        mark = "*" if name == current_group else " "
-        now = obj.get("now", "")
-        print(f"{mark} {name}  now={now}  nodes={len(nodes)}")
-
-
-def cmd_nodes(args):
-    proxies = get_proxies()
-    state = read_state()
-    group = args.group or default_group(proxies, state.get("group"))
-    nodes = get_group_nodes(group, proxies)
-    now = proxies[group].get("now", "")
-
-    print(f"group: {group}")
-    print(f"now:   {now}")
-    print()
-
-    for n in nodes:
-        mark = "*" if n == now else " "
-        print(f"{mark} {n}")
-
-
-def cmd_group(args):
-    proxies = get_proxies()
-    group = default_group(proxies, args.name)
-
-    state = read_state()
-    state["group"] = group
-    write_state(state)
-
-    print(f"default group: {group}")
-
-
-def cmd_use(args):
-    proxies = get_proxies()
-    state = read_state()
-
-    group = args.group or default_group(proxies, state.get("group"))
-    nodes = get_group_nodes(group, proxies)
-
-    node = args.node
-    if node not in nodes:
-        matches = [n for n in nodes if node.lower() in n.lower()]
-        if len(matches) == 1:
-            node = matches[0]
-        elif len(matches) > 1:
-            print("ambiguous node:")
-            for m in matches:
-                print(f"  {m}")
-            raise SystemExit(2)
-        else:
-            die(f"node not in group {group}: {args.node}")
-
-    select_node(group, node)
-
-    state["group"] = group
-    state["node"] = node
-    write_state(state)
-
-
-def cmd_pick(args):
-    proxies = get_proxies()
-    state = read_state()
-
-    group = args.group or default_group(proxies, state.get("group"))
-    nodes = get_group_nodes(group, proxies)
-
+def fzf_select(items, prompt):
     if shutil.which("fzf"):
         p = subprocess.run(
-            ["fzf", "--prompt", f"{group}> "],
-            input="\n".join(nodes) + "\n",
+            ["fzf", "--prompt", prompt],
+            input="\n".join(items) + "\n",
             text=True,
             stdout=subprocess.PIPE,
         )
-        node = p.stdout.strip()
-        if not node:
-            raise SystemExit(1)
+        result = p.stdout.strip()
+        return result if result else None
     else:
-        print(f"group: {group}")
-        for i, n in enumerate(nodes, 1):
-            print(f"{i:2d}) {n}")
-        idx = int(input("node number: "))
-        node = nodes[idx - 1]
-
-    select_node(group, node)
-
-    state["group"] = group
-    state["node"] = node
-    write_state(state)
+        for i, item in enumerate(items, 1):
+            print(f"{i:2d}) {item}")
+        try:
+            idx = int(input("number: "))
+            if 1 <= idx <= len(items):
+                return items[idx - 1]
+        except (ValueError, EOFError):
+            pass
+        return None
 
 
-def cmd_apply(args):
+def cmd_node_pick(args):
     proxies = get_proxies()
     state = read_state()
 
-    group = default_group(proxies, state.get("group"))
-    nodes = get_group_nodes(group, proxies)
+    group = state.get("group")
+    if not group:
+        die("no default group set. Run: mihomoctl group pick")
 
-    node = state.get("node")
-    if node not in nodes:
-        node = nodes[0]
+    nodes = get_group_nodes(group, proxies)
+    now = proxies[group].get("now", "")
+
+    items = []
+    for n in nodes:
+        prefix = "* " if n == now else "  "
+        items.append(f"{prefix}{n}")
+
+    result = fzf_select(items, f"{group}> ")
+    if not result:
+        raise SystemExit(1)
+
+    node = result.lstrip("* ").strip()
 
     select_node(group, node)
 
-    state["group"] = group
     state["node"] = node
     write_state(state)
+
+
+def cmd_group_pick(args):
+    proxies = get_proxies()
+    state = read_state()
+
+    groups = candidate_groups(proxies)
+    if not groups:
+        die("no selectable proxy groups found")
+
+    items = []
+    for name, obj, nodes in groups:
+        prefix = "* " if name == state.get("group") else "  "
+        now = obj.get("now", "")
+        items.append(f"{prefix}{name}  ({len(nodes)} nodes, now={now})")
+
+    result = fzf_select(items, "group> ")
+    if not result:
+        raise SystemExit(1)
+
+    group = result.split("  ")[0].lstrip("* ").strip()
+
+    state["group"] = group
+    write_state(state)
+    print(f"default group: {group}")
+
+
+def cmd_group_profile(args):
+    proxies = get_proxies()
+    state = read_state()
+
+    groups = candidate_groups(proxies)
+    if not groups:
+        die("no selectable proxy groups found")
+
+    items = []
+    for name, obj, nodes in groups:
+        prefix = "* " if name == state.get("profile") else "  "
+        now = obj.get("now", "")
+        items.append(f"{prefix}{name}  (now={now})")
+
+    result = fzf_select(items, "profile> ")
+    if not result:
+        raise SystemExit(1)
+
+    profile = result.split("  ")[0].lstrip("* ").strip()
+
+    sub_items = []
+    obj = proxies.get(profile)
+    if is_group(obj):
+        for n in obj.get("all", []):
+            now_mark = "* " if n == obj.get("now") else "  "
+            sub_items.append(f"{now_mark}{n}")
+
+    if not sub_items:
+        die(f"no selectable options in profile: {profile}")
+
+    sub_result = fzf_select(sub_items, f"{profile}> ")
+    if not sub_result:
+        raise SystemExit(1)
+
+    node = sub_result.lstrip("* ").strip()
+
+    select_node(profile, node)
+
+    state["profile"] = profile
+    write_state(state)
+
+
+def cmd_enable(args):
+    need_root("enabling mihomo")
+    subprocess.run(["systemctl", "enable", "--now", "mihomo.service"], check=True)
+    print("mihomo enabled and started")
+
+
+def cmd_disable(args):
+    need_root("disabling mihomo")
+    subprocess.run(["systemctl", "disable", "--now", "mihomo.service"], check=True)
+    print("mihomo stopped and disabled")
 
 
 def cmd_status(args):
     state = read_state()
 
-    print(f"configured mode: {state.get('mode', 'tun')}")
-    print(f"default group:   {state.get('group')}")
-    print(f"default node:    {state.get('node')}")
+    print(f"mode:       {state.get('mode', 'tun')}")
+    print(f"group:      {state.get('group')}")
+    print(f"node:       {state.get('node')}")
+    print(f"profile:    {state.get('profile')}")
     print()
 
     try:
+        subprocess.run(
+            ["systemctl", "is-active", "--quiet", "mihomo.service"],
+            check=True,
+        )
+        print("service:    active")
+    except subprocess.CalledProcessError:
+        print("service:    inactive")
+
+    try:
         cfg = http_json("GET", "/configs")
-        print(f"api:             ok")
-        print(f"mixed-port:      {cfg.get('mixed-port')}")
-        print(f"mode:            {cfg.get('mode')}")
+        print("api:        ok")
+        print(f"mixed-port: {cfg.get('mixed-port')}")
+        print(f"mode:       {cfg.get('mode')}")
         tun = cfg.get("tun") if isinstance(cfg.get("tun"), dict) else {}
-        print(f"tun.enable:      {tun.get('enable')}")
+        print(f"tun.enable: {tun.get('enable')}")
     except Exception as e:
-        print(f"api:             down ({e})")
+        print(f"api:        down ({e})")
 
     try:
         proxies = get_proxies()
-        group = default_group(proxies, state.get("group"))
-        now = proxies[group].get("now")
-        print(f"active group:    {group}")
-        print(f"active node:     {now}")
+        group = state.get("group")
+        if group and group in proxies:
+            now = proxies[group].get("now")
+            print(f"active:     {group} -> {now}")
     except Exception as e:
-        print(f"proxies:         unavailable ({e})")
+        print(f"proxies:    unavailable ({e})")
 
 
 def cmd_mode(args):
@@ -471,7 +469,6 @@ def cmd_mode(args):
     generate_config()
 
     subprocess.run(["systemctl", "restart", "mihomo.service"], check=True)
-    subprocess.run(["mihomoctl", "apply"], check=False)
 
     print(f"mode switched to: {args.value}")
 
@@ -505,7 +502,7 @@ def cmd_sub_update(args):
         die("subscription URL is empty")
 
     print("downloading subscription...")
-    req = urllib.request.Request(url, headers={"User-Agent": "mihomoctl/1.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "mihomo/1.0"})
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
             content = r.read().decode()
@@ -528,7 +525,6 @@ def cmd_sub_update(args):
 
     if subprocess.run(["systemctl", "is-active", "--quiet", "mihomo.service"]).returncode == 0:
         subprocess.run(["systemctl", "restart", "mihomo.service"], check=True)
-        subprocess.run(["mihomoctl", "apply"], check=False)
 
     print("subscription updated")
 
@@ -536,7 +532,7 @@ def cmd_sub_update(args):
 def cmd_restart(args):
     need_root("restarting mihomo")
     subprocess.run(["systemctl", "restart", "mihomo.service"], check=True)
-    subprocess.run(["mihomoctl", "apply"], check=False)
+    print("mihomo restarted")
 
 
 def cmd_logs(args):
@@ -553,29 +549,18 @@ def main():
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("status").set_defaults(fn=cmd_status)
-    sub.add_parser("groups").set_defaults(fn=cmd_groups)
-
-    n = sub.add_parser("nodes")
-    n.add_argument("group", nargs="?")
-    n.set_defaults(fn=cmd_nodes)
 
     g = sub.add_parser("group")
     gsub = g.add_subparsers(dest="group_cmd", required=True)
-    gs = gsub.add_parser("set")
-    gs.add_argument("name")
-    gs.set_defaults(fn=cmd_group)
+    gsub.add_parser("pick").set_defaults(fn=cmd_group_pick)
+    gsub.add_parser("profile").set_defaults(fn=cmd_group_profile)
 
-    u = sub.add_parser("use")
-    u.add_argument("node")
-    u.add_argument("group", nargs="?")
-    u.set_defaults(fn=cmd_use)
+    n = sub.add_parser("node")
+    nsub = n.add_subparsers(dest="node_cmd", required=True)
+    nsub.add_parser("pick").set_defaults(fn=cmd_node_pick)
 
-    pick = sub.add_parser("pick")
-    pick.add_argument("group", nargs="?")
-    pick.set_defaults(fn=cmd_pick)
-
-    apply = sub.add_parser("apply")
-    apply.set_defaults(fn=cmd_apply)
+    sub.add_parser("enable").set_defaults(fn=cmd_enable)
+    sub.add_parser("disable").set_defaults(fn=cmd_disable)
 
     m = sub.add_parser("mode")
     m.add_argument("value", nargs="?")

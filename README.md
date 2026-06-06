@@ -5,35 +5,28 @@ CLI tool for managing Mihomo (Clash.Meta) subscriptions on Linux.
 ## Features
 
 - Subscription management (set URL, auto-update)
-- Proxy group/node selection via CLI
-- Interactive node picker (with fzf)
+- Proxy group/node selection via interactive picker (fzf)
+- Routing profile selection
 - TUN/Proxy mode switching
-- Systemd integration (daemon + auto-update timer)
+- Systemd integration (enable/disable, daemon, auto-update timer)
 
 ## Requirements
 
 - Linux with systemd
 - Python 3
 - PyYAML (`python3-yaml`)
+- fzf (optional, for interactive selection)
 
 ## Install
 
 ```bash
-git clone https://github.com/user/mihomoctl.git
+git clone https://github.com/MrJefter/mihomoctl.git
 cd mihomoctl
 sudo make install
 sudo ./install.sh
 ```
 
 The `make install` copies files; `install.sh` handles dependencies and mihomo binary download.
-
-## Updating
-
-```bash
-cd /path/to/mihomoctl
-sudo make update
-sudo systemctl restart mihomo.service
-```
 
 ## Uninstall
 
@@ -50,18 +43,25 @@ sudo rm -rf /etc/mihomo /var/lib/mihomoctl
 ## Commands
 
 ```
-mihomoctl status              # show current status
-mihomoctl groups              # list proxy groups
-mihomoctl nodes [group]       # list nodes in a group
-mihomoctl group set <name>    # set default group
-mihomoctl use <node> [group]  # select a node
-mihomoctl pick [group]        # interactive selection (needs fzf)
-mihomoctl apply               # apply saved node
-mihomoctl mode [tun|proxy]    # get/set mode
-mihomoctl sub set [url]       # set subscription URL
-mihomoctl sub update          # update subscription
-mihomoctl restart             # restart mihomo service
-mihomoctl logs                # tail service logs
+mihomoctl group pick         # fzf: choose default group
+mihomoctl group profile      # fzf: choose routing profile
+mihomoctl node pick          # fzf: pick node in current group
+mihomoctl enable             # enable and start mihomo
+mihomoctl disable            # stop and disable mihomo
+mihomoctl status             # show status
+mihomoctl mode [tun|proxy]   # get/set mode
+mihomoctl sub set [url]      # set subscription URL
+mihomoctl sub update         # update subscription
+mihomoctl restart            # restart mihomo
+mihomoctl logs               # tail service logs
+```
+
+## Updating
+
+```bash
+cd /path/to/mihomoctl
+sudo make update
+sudo systemctl restart mihomo.service
 ```
 
 ## Systemd Units
@@ -75,7 +75,7 @@ mihomoctl logs                # tail service logs
 Enable after install:
 
 ```bash
-sudo systemctl enable --now mihomo.service
+sudo mihomoctl enable
 sudo systemctl enable --now mihomo-update.timer  # optional
 ```
 
