@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO="https://github.com/MrJefter/mihomoctl.git"
 if [[ -n "${SUDO_USER:-}" ]]; then
-    REAL_HOME="$(eval echo "~$SUDO_USER")"
+    REAL_HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
 else
     REAL_HOME="$HOME"
 fi
@@ -216,12 +216,7 @@ download_roscomvpn() {
 
 do_install() {
     local repo_dir
-    repo_dir="$(find_repo_dir)"
-
-    if [[ -z "$repo_dir" ]]; then
-        info "Not running from repository, cloning..."
-        repo_dir="$(clone_repo)"
-    fi
+    repo_dir="$(clone_repo)"
 
     install_deps
     install_mihomo
