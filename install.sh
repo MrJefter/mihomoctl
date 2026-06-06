@@ -73,7 +73,7 @@ install_mihomo() {
 
     local tmpdir
     tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' EXIT
+    trap 'rm -rf "${tmpdir:-}"' EXIT
 
     local url="https://github.com/MetaCubeX/mihomo/releases/latest/download/mihomo-linux-${arch}-compatible.gz"
     info "Fetching: $url"
