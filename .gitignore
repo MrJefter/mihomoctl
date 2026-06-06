@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.tar.zst
+*.tar.gz
+*.tar.bz2
+state.json
+*.swp
+*.swo
+*~
+.vscode/
+.idea/

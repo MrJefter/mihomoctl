@@ -1,0 +1,602 @@
+#!/usr/bin/env python3
+import argparse
+import getpass
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+import yaml
+
+ETC = Path("/etc/mihomo")
+VAR = Path("/var/lib/mihomoctl")
+
+SUB_URL = ETC / "sub.url"
+BASE_CFG = ETC / "base.yaml"
+CFG = ETC / "config.yaml"
+STATE = VAR / "state.json"
+
+CONTROLLER = "http://127.0.0.1:9090"
+MIXED_PORT = 7890
+
+GROUP_TYPES = {
+    "selector", "select",
+}
+
+NON_NODE_NAMES = {
+    "DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBLE",
+}
+
+
+def die(msg, code=1):
+    print(f"error: {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def need_root(action):
+    if os.geteuid() != 0:
+        die(f"{action} needs root. Run: sudo mihomoctl ...")
+
+
+def read_state():
+    if not STATE.exists():
+        return {"mode": "tun", "group": None, "node": None}
+    try:
+        return json.loads(STATE.read_text())
+    except Exception:
+        return {"mode": "tun", "group": None, "node": None}
+
+
+def write_state(state):
+    VAR.mkdir(parents=True, exist_ok=True)
+    STATE.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n")
+
+
+def load_yaml(path):
+    if not path.exists():
+        die(f"{path} does not exist")
+    data = yaml.safe_load(path.read_text()) or {}
+    if not isinstance(data, dict):
+        die(f"{path} is not a YAML object")
+    return data
+
+
+def save_yaml(path, data):
+    path.write_text(
+        yaml.safe_dump(
+            data,
+            allow_unicode=True,
+            sort_keys=False,
+            default_flow_style=False,
+        )
+    )
+
+
+def generate_config():
+    need_root("generating config")
+
+    state = read_state()
+    mode = state.get("mode") or "tun"
+
+    cfg = load_yaml(BASE_CFG)
+
+    # Keep Remnawave/RoscomVPN structure, override only host-side runtime knobs.
+    cfg["mixed-port"] = MIXED_PORT
+    cfg["allow-lan"] = False
+    cfg["mode"] = cfg.get("mode", "rule")
+    cfg["log-level"] = cfg.get("log-level", "info")
+
+    # Local REST API only.
+    cfg["external-controller"] = "127.0.0.1:9090"
+    cfg["secret"] = ""
+
+    profile = cfg.get("profile")
+    if not isinstance(profile, dict):
+        profile = {}
+    profile["store-selected"] = True
+    profile.setdefault("store-fake-ip", True)
+    cfg["profile"] = profile
+
+    tun = cfg.get("tun")
+    if not isinstance(tun, dict):
+        tun = {}
+
+    tun["enable"] = mode == "tun"
+    tun["stack"] = "gvisor"
+    tun.setdefault("auto-route", True)
+    tun.setdefault("auto-detect-interface", True)
+    tun["strict-route"] = False
+
+    # Critical for Linux TUN mode: catch DNS from applications/systemd-resolved.
+    # Without this, TUN may be up while normal apps hang on DNS/routing.
+    if mode == "tun":
+        tun["dns-hijack"] = ["any:53"]
+    else:
+        tun.pop("dns-hijack", None)
+
+    # Do not exclude Mihomo fake-ip ranges from TUN routing.
+    # If fake IPs are excluded, apps resolve domains to 198.18.x.x
+    # and then try to connect outside the TUN, causing timeouts.
+    fake_excludes = {
+        "198.18.0.0/15",
+        "198.18.0.0/16",
+        "198.19.0.0/16",
+        "198.18.0.0/24",
+        "198.18.0.0/30",
+    }
+
+    excludes = tun.get("route-exclude-address")
+    if isinstance(excludes, list):
+        tun["route-exclude-address"] = [
+            x for x in excludes
+            if str(x).strip() not in fake_excludes
+        ]
+
+    cfg["tun"] = tun
+
+    # Keep subscription DNS if it exists, but force the minimum required
+    # for sane TUN operation.
+    cfg["ipv6"] = False
+
+    dns = cfg.get("dns")
+    if not isinstance(dns, dict):
+        dns = {}
+
+    dns["enable"] = True
+    dns["ipv6"] = False
+    dns["enhanced-mode"] = "redir-host"
+    dns.pop("fake-ip-range", None)
+    dns.setdefault("default-nameserver", ["1.1.1.1", "8.8.8.8"])
+    dns.setdefault("nameserver", [
+        "https://1.1.1.1/dns-query",
+        "https://8.8.8.8/dns-query"
+    ])
+    dns.setdefault("fallback", [
+        "https://1.0.0.1/dns-query",
+        "https://8.8.4.4/dns-query"
+    ])
+    dns.setdefault("fake-ip-filter", [
+        "*.lan",
+        "*.local",
+        "localhost.ptlogin2.qq.com",
+        "dns.msftncsi.com",
+        "www.msftncsi.com",
+        "time.*.com",
+        "time.*.gov",
+        "time.*.edu.cn",
+        "time.*.apple.com",
+        "time-ios.apple.com",
+        "time1.*.com",
+        "time2.*.com",
+        "time3.*.com",
+        "time4.*.com",
+        "time5.*.com",
+        "time6.*.com",
+        "time7.*.com",
+        "ntp.*.com",
+        "ntp1.*.com",
+        "ntp2.*.com",
+        "ntp3.*.com",
+        "ntp4.*.com",
+        "ntp5.*.com",
+        "ntp6.*.com",
+        "ntp7.*.com"
+    ])
+
+    # redir-host does not need fake-ip specific config.
+    if dns.get("enhanced-mode") == "redir-host":
+        dns.pop("fake-ip-range", None)
+        dns.pop("fake-ip-filter", None)
+
+    cfg["dns"] = dns
+
+    ETC.mkdir(parents=True, exist_ok=True)
+    save_yaml(CFG, cfg)
+
+    subprocess.run(["/usr/local/bin/mihomo", "-t", "-d", str(ETC)], check=True)
+    print(f"generated {CFG} mode={mode}")
+
+
+def http_json(method, path, body=None, timeout=8):
+    url = CONTROLLER + path
+    data = None
+    headers = {}
+
+    if body is not None:
+        data = json.dumps(body, ensure_ascii=False).encode()
+        headers["Content-Type"] = "application/json"
+
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        raw = r.read()
+        if not raw:
+            return None
+        return json.loads(raw.decode())
+
+
+def wait_api(timeout=20):
+    end = time.time() + timeout
+    last = None
+    while time.time() < end:
+        try:
+            return http_json("GET", "/version")
+        except Exception as e:
+            last = e
+            time.sleep(0.5)
+    die(f"mihomo API is not responding at {CONTROLLER}: {last}")
+
+
+def get_proxies():
+    wait_api()
+    data = http_json("GET", "/proxies")
+    proxies = data.get("proxies") if isinstance(data, dict) else None
+    if not isinstance(proxies, dict):
+        die("bad /proxies response")
+    return proxies
+
+
+def is_group(obj):
+    return isinstance(obj, dict) and isinstance(obj.get("all"), list)
+
+
+def is_selector(obj):
+    if not is_group(obj):
+        return False
+    t = str(obj.get("type", "")).lower()
+    return t in GROUP_TYPES or "selector" in t or "select" in t
+
+
+def is_node_name(name, proxies):
+    if name in NON_NODE_NAMES:
+        return False
+    obj = proxies.get(name)
+    if not isinstance(obj, dict):
+        return True
+    if is_group(obj):
+        return False
+    t = str(obj.get("type", "")).lower()
+    if t in {"direct", "reject"}:
+        return False
+    return True
+
+
+def candidate_groups(proxies):
+    groups = []
+    for name, obj in proxies.items():
+        if is_selector(obj):
+            nodes = [x for x in obj.get("all", []) if is_node_name(x, proxies)]
+            if nodes:
+                groups.append((name, obj, nodes))
+    return groups
+
+
+def default_group(proxies, preferred=None):
+    groups = candidate_groups(proxies)
+    if not groups:
+        die("no selectable proxy groups found")
+
+    names = [g[0] for g in groups]
+
+    if preferred and preferred in names:
+        return preferred
+
+    for p in ["PROXY", "Proxy", "proxy", "GLOBAL", "🚀 节点选择", "🔰 节点选择", "节点选择"]:
+        if p in names:
+            return p
+
+    return groups[0][0]
+
+
+def get_group_nodes(group, proxies):
+    obj = proxies.get(group)
+    if not is_group(obj):
+        die(f"not a proxy group: {group}")
+
+    nodes = [x for x in obj.get("all", []) if is_node_name(x, proxies)]
+    if not nodes:
+        die(f"group has no selectable nodes: {group}")
+    return nodes
+
+
+def select_node(group, node):
+    path = "/proxies/" + urllib.parse.quote(group, safe="")
+    http_json("PUT", path, {"name": node})
+    print(f"selected: {group} -> {node}")
+
+
+def cmd_groups(args):
+    proxies = get_proxies()
+    state = read_state()
+    current_group = state.get("group")
+
+    for name, obj, nodes in candidate_groups(proxies):
+        mark = "*" if name == current_group else " "
+        now = obj.get("now", "")
+        print(f"{mark} {name}  now={now}  nodes={len(nodes)}")
+
+
+def cmd_nodes(args):
+    proxies = get_proxies()
+    state = read_state()
+    group = args.group or default_group(proxies, state.get("group"))
+    nodes = get_group_nodes(group, proxies)
+    now = proxies[group].get("now", "")
+
+    print(f"group: {group}")
+    print(f"now:   {now}")
+    print()
+
+    for n in nodes:
+        mark = "*" if n == now else " "
+        print(f"{mark} {n}")
+
+
+def cmd_group(args):
+    proxies = get_proxies()
+    group = default_group(proxies, args.name)
+
+    state = read_state()
+    state["group"] = group
+    write_state(state)
+
+    print(f"default group: {group}")
+
+
+def cmd_use(args):
+    proxies = get_proxies()
+    state = read_state()
+
+    group = args.group or default_group(proxies, state.get("group"))
+    nodes = get_group_nodes(group, proxies)
+
+    node = args.node
+    if node not in nodes:
+        matches = [n for n in nodes if node.lower() in n.lower()]
+        if len(matches) == 1:
+            node = matches[0]
+        elif len(matches) > 1:
+            print("ambiguous node:")
+            for m in matches:
+                print(f"  {m}")
+            raise SystemExit(2)
+        else:
+            die(f"node not in group {group}: {args.node}")
+
+    select_node(group, node)
+
+    state["group"] = group
+    state["node"] = node
+    write_state(state)
+
+
+def cmd_pick(args):
+    proxies = get_proxies()
+    state = read_state()
+
+    group = args.group or default_group(proxies, state.get("group"))
+    nodes = get_group_nodes(group, proxies)
+
+    if shutil.which("fzf"):
+        p = subprocess.run(
+            ["fzf", "--prompt", f"{group}> "],
+            input="\n".join(nodes) + "\n",
+            text=True,
+            stdout=subprocess.PIPE,
+        )
+        node = p.stdout.strip()
+        if not node:
+            raise SystemExit(1)
+    else:
+        print(f"group: {group}")
+        for i, n in enumerate(nodes, 1):
+            print(f"{i:2d}) {n}")
+        idx = int(input("node number: "))
+        node = nodes[idx - 1]
+
+    select_node(group, node)
+
+    state["group"] = group
+    state["node"] = node
+    write_state(state)
+
+
+def cmd_apply(args):
+    proxies = get_proxies()
+    state = read_state()
+
+    group = default_group(proxies, state.get("group"))
+    nodes = get_group_nodes(group, proxies)
+
+    node = state.get("node")
+    if node not in nodes:
+        node = nodes[0]
+
+    select_node(group, node)
+
+    state["group"] = group
+    state["node"] = node
+    write_state(state)
+
+
+def cmd_status(args):
+    state = read_state()
+
+    print(f"configured mode: {state.get('mode', 'tun')}")
+    print(f"default group:   {state.get('group')}")
+    print(f"default node:    {state.get('node')}")
+    print()
+
+    try:
+        cfg = http_json("GET", "/configs")
+        print(f"api:             ok")
+        print(f"mixed-port:      {cfg.get('mixed-port')}")
+        print(f"mode:            {cfg.get('mode')}")
+        tun = cfg.get("tun") if isinstance(cfg.get("tun"), dict) else {}
+        print(f"tun.enable:      {tun.get('enable')}")
+    except Exception as e:
+        print(f"api:             down ({e})")
+
+    try:
+        proxies = get_proxies()
+        group = default_group(proxies, state.get("group"))
+        now = proxies[group].get("now")
+        print(f"active group:    {group}")
+        print(f"active node:     {now}")
+    except Exception as e:
+        print(f"proxies:         unavailable ({e})")
+
+
+def cmd_mode(args):
+    state = read_state()
+
+    if not args.value:
+        print(state.get("mode", "tun"))
+        return
+
+    if args.value not in {"tun", "proxy"}:
+        die("mode must be: tun or proxy")
+
+    need_root("changing mode")
+
+    state["mode"] = args.value
+    write_state(state)
+
+    generate_config()
+
+    subprocess.run(["systemctl", "restart", "mihomo.service"], check=True)
+    subprocess.run(["mihomoctl", "apply"], check=False)
+
+    print(f"mode switched to: {args.value}")
+
+
+def cmd_sub_set(args):
+    need_root("setting subscription URL")
+
+    if args.url:
+        url = args.url
+    else:
+        url = getpass.getpass("Paste Mihomo/Clash subscription URL: ")
+
+    if not url.startswith(("http://", "https://")):
+        die("subscription URL must start with http:// or https://")
+
+    ETC.mkdir(parents=True, exist_ok=True)
+    SUB_URL.write_text(url.strip() + "\n")
+    os.chmod(SUB_URL, 0o600)
+
+    print(f"saved: {SUB_URL}")
+
+
+def cmd_sub_update(args):
+    need_root("updating subscription")
+
+    if not SUB_URL.exists():
+        die("subscription URL missing. Run: sudo mihomoctl sub set")
+
+    url = SUB_URL.read_text().strip()
+    if not url:
+        die("subscription URL is empty")
+
+    print("downloading subscription...")
+    req = urllib.request.Request(url, headers={"User-Agent": "mihomoctl/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            content = r.read().decode()
+    except urllib.error.URLError as e:
+        die(f"download failed: {e}")
+
+    data = yaml.safe_load(content)
+    if not isinstance(data, dict):
+        die("downloaded subscription is not a YAML object")
+
+    if not any(k in data for k in ("proxies", "proxy-providers", "proxy-groups", "rules")):
+        print(content[:1000], file=sys.stderr)
+        die("downloaded file does not look like a Mihomo/Clash YAML config")
+
+    BASE_CFG.write_text(content)
+    os.chmod(BASE_CFG, 0o600)
+    print(f"saved: {BASE_CFG}")
+
+    generate_config()
+
+    if subprocess.run(["systemctl", "is-active", "--quiet", "mihomo.service"]).returncode == 0:
+        subprocess.run(["systemctl", "restart", "mihomo.service"], check=True)
+        subprocess.run(["mihomoctl", "apply"], check=False)
+
+    print("subscription updated")
+
+
+def cmd_restart(args):
+    need_root("restarting mihomo")
+    subprocess.run(["systemctl", "restart", "mihomo.service"], check=True)
+    subprocess.run(["mihomoctl", "apply"], check=False)
+
+
+def cmd_logs(args):
+    try:
+        subprocess.run(["journalctl", "-u", "mihomo.service", "-f", "-o", "cat"])
+    except KeyboardInterrupt:
+        print()
+        return
+
+
+def main():
+    p = argparse.ArgumentParser(prog="mihomoctl")
+
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("status").set_defaults(fn=cmd_status)
+    sub.add_parser("groups").set_defaults(fn=cmd_groups)
+
+    n = sub.add_parser("nodes")
+    n.add_argument("group", nargs="?")
+    n.set_defaults(fn=cmd_nodes)
+
+    g = sub.add_parser("group")
+    gsub = g.add_subparsers(dest="group_cmd", required=True)
+    gs = gsub.add_parser("set")
+    gs.add_argument("name")
+    gs.set_defaults(fn=cmd_group)
+
+    u = sub.add_parser("use")
+    u.add_argument("node")
+    u.add_argument("group", nargs="?")
+    u.set_defaults(fn=cmd_use)
+
+    pick = sub.add_parser("pick")
+    pick.add_argument("group", nargs="?")
+    pick.set_defaults(fn=cmd_pick)
+
+    apply = sub.add_parser("apply")
+    apply.set_defaults(fn=cmd_apply)
+
+    m = sub.add_parser("mode")
+    m.add_argument("value", nargs="?")
+    m.set_defaults(fn=cmd_mode)
+
+    s = sub.add_parser("sub")
+    ssub = s.add_subparsers(dest="sub_cmd", required=True)
+
+    ss = ssub.add_parser("set")
+    ss.add_argument("url", nargs="?")
+    ss.set_defaults(fn=cmd_sub_set)
+
+    su = ssub.add_parser("update")
+    su.set_defaults(fn=cmd_sub_update)
+
+    sub.add_parser("restart").set_defaults(fn=cmd_restart)
+    sub.add_parser("logs").set_defaults(fn=cmd_logs)
+
+    args = p.parse_args()
+    args.fn(args)
+
+
+if __name__ == "__main__":
+    main()

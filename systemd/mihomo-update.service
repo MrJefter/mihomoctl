@@ -1,0 +1,6 @@
+[Unit]
+Description=Update mihomo subscription config
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/mihomo-update-config
