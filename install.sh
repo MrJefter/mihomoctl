@@ -2,7 +2,8 @@
 set -euo pipefail
 
 REPO="https://github.com/MrJefter/mihomoctl.git"
-INSTALL_DIR="${MIHOMOCTL_DIR:-$HOME/.local/share/mihomoctl}"
+REAL_HOME="${SUDO_USER:-$HOME}"
+INSTALL_DIR="${MIHOMOCTL_DIR:-$REAL_HOME/.local/share/mihomoctl}"
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -85,11 +86,6 @@ install_deps() {
 }
 
 install_mihomo() {
-    if [[ -x "$BINDIR/mihomo" ]]; then
-        info "mihomo already installed: $BINDIR/mihomo"
-        return
-    fi
-
     info "Downloading mihomo..."
     local arch
     arch="$(uname -m)"
