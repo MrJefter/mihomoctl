@@ -2,7 +2,11 @@
 set -euo pipefail
 
 REPO="https://github.com/MrJefter/mihomoctl.git"
-REAL_HOME="${SUDO_USER:-$HOME}"
+if [[ -n "${SUDO_USER:-}" ]]; then
+    REAL_HOME="$(eval echo "~$SUDO_USER")"
+else
+    REAL_HOME="$HOME"
+fi
 INSTALL_DIR="${MIHOMOCTL_DIR:-$REAL_HOME/.local/share/mihomoctl}"
 RED='\033[0;31m'
 GREEN='\033[0;32m'
