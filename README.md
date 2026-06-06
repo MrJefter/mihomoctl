@@ -26,7 +26,18 @@ sudo make install
 sudo ./install.sh
 ```
 
-The `make install` copies files; `install.sh` handles dependencies and mihomo binary download.
+The `make install` copies files; `install.sh` handles dependencies, mihomo binary download, and optionally downloads the [RoscomVPN routing template](https://github.com/hydraponique/roscomvpn-routing).
+
+## Routing Template
+
+During installation you'll be asked whether to download the RoscomVPN routing template. This provides ready-made proxy groups (VPN, YouTube, Discord, Games, etc.) and rule-sets for Russian/Belarusian routing.
+
+If you decline, set your subscription manually:
+
+```bash
+sudo mihomoctl sub set
+sudo mihomoctl sub update
+```
 
 ## Uninstall
 
@@ -85,7 +96,8 @@ sudo systemctl enable --now mihomo-update.timer  # optional
 /usr/local/bin/mihomoctl
 /usr/local/bin/mihomo
 /usr/local/sbin/mihomo-update-config
-/etc/mihomo/config.yaml
+/etc/mihomo/base.yaml          # subscription template (downloaded via sub update or install prompt)
+/etc/mihomo/config.yaml        # generated config (do not edit directly)
 /etc/systemd/system/mihomo.service
 /etc/systemd/system/mihomo-update.service
 /etc/systemd/system/mihomo-update.timer

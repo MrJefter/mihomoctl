@@ -114,14 +114,7 @@ install_files() {
         install -Dm644 "$SCRIPT_DIR/systemd/$f" "$UNITDIR/$f"
     done
 
-    info "Installing default config..."
     mkdir -p "$SYSCONFDIR/mihomo"
-    if [[ ! -f "$SYSCONFDIR/mihomo/config.yaml" ]]; then
-        install -Dm600 "$SCRIPT_DIR/config/base.yaml" "$SYSCONFDIR/mihomo/config.yaml"
-    else
-        warn "$SYSCONFDIR/mihomo/config.yaml already exists, skipping (use your existing config)"
-    fi
-
     mkdir -p /var/lib/mihomoctl
 }
 
@@ -134,26 +127,50 @@ enable_services() {
     echo ""
     echo "Next steps:"
     echo ""
-    echo "  1. Set your subscription URL:"
-    echo "     sudo mihomoctl sub set"
+    echo "  1. Enable and start mihomo:"
+    echo "     sudo mihomoctl enable"
     echo ""
-    echo "  2. Enable and start mihomo:"
-    echo "     sudo systemctl enable --now mihomo.service"
-    echo ""
-    echo "  3. (Optional) Enable auto-update timer:"
+    echo "  2. (Optional) Enable auto-update timer:"
     echo "     sudo systemctl enable --now mihomo-update.timer"
     echo ""
-    echo "  4. Manage:"
-    echo "     mihomoctl status          # status"
-    echo "     mihomoctl groups          # list proxy groups"
-    echo "     mihomoctl nodes           # list nodes"
-    echo "     mihomoctl use <node>      # select node"
-    echo "     mihomoctl pick            # interactive select (needs fzf)"
-    echo "     mihomoctl mode tun|proxy  # switch mode"
+    echo "  3. Manage:"
+    echo "     mihomoctl group pick       # pick default group"
+    echo "     mihomoctl group profile    # pick routing profile"
+    echo "     mihomoctl node pick        # pick node in current group"
+    echo "     mihomoctl mode tun|proxy   # switch mode"
     echo ""
+}
+
+download_roscomvpn() {
+    local base="$SYSCONFDIR/mihomo/base.yaml"
+    if [[ -f "$base" ]]; then
+        warn "$base already exists, skipping"
+        return
+    fi
+
+    echo ""
+    read -rp "Download RoscomVPN routing template? [Y/n] " answer
+    case "${answer,,}" in
+        n|no) info "Skipped. Run 'sudo mihomoctl sub set' to configure manually." ;;
+        *)
+            info "Downloading RoscomVPN template..."
+            local url="https://raw.githubusercontent.com/hydraponique/roscomvpn-routing/main/MIHOMO/template_remnawave.yaml"
+            if command -v wget &>/dev/null; then
+                wget -q -O "$base" "$url"
+            elif command -v curl &>/dev/null; then
+                curl -sL -o "$base" "$url"
+            else
+                warn "Neither wget nor curl found. Download manually: $url"
+                return
+            fi
+            chmod 600 "$base"
+            info "Saved: $base"
+            ;;
+    esac
 }
 
 install_deps
 install_mihomo
 install_files
+download_roscomvpn
 enable_services

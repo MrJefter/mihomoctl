@@ -43,9 +43,7 @@ install:
 	@install -Dm644 systemd/mihomo.service          $(UNIT_DIR)/mihomo.service
 	@install -Dm644 systemd/mihomo-update.service   $(UNIT_DIR)/mihomo-update.service
 	@install -Dm644 systemd/mihomo-update.timer     $(UNIT_DIR)/mihomo-update.timer
-	@echo "Installing default config..."
 	@mkdir -p $(CONF_DIR)
-	@test -f $(CONF_DIR)/config.yaml || install -Dm600 config/base.yaml $(CONF_DIR)/config.yaml
 	@mkdir -p $(STATE_DIR)
 	@systemctl daemon-reload 2>/dev/null || true
 	@echo ""
