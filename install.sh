@@ -103,6 +103,11 @@ install_mihomo() {
     gunzip "$tmpdir/mihomo.gz"
     chmod +x "$tmpdir/mihomo"
     mv "$tmpdir/mihomo" "$BINDIR/mihomo"
+
+    if command -v restorecon &>/dev/null; then
+        restorecon "$BINDIR/mihomo"
+    fi
+
     info "mihomo installed to $BINDIR/mihomo"
 }
 
