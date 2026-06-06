@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO="https://github.com/MrJefter/mihomoctl.git"
+INSTALL_DIR="${MIHOMOCTL_DIR:-$HOME/.local/share/mihomoctl}"
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -12,7 +13,7 @@ warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
 error() { echo -e "${RED}[-]${NC} $*"; exit 1; }
 
 if [[ $EUID -ne 0 ]]; then
-    error "Run with sudo: sudo ./install.sh"
+    error "Run with sudo: sudo bash install.sh"
 fi
 
 PREFIX="${PREFIX:-/usr/local}"
@@ -20,6 +21,29 @@ BINDIR="${BINDIR:-$PREFIX/bin}"
 SBINDIR="${SBINDIR:-$PREFIX/sbin}"
 SYSCONFDIR="${SYSCONFDIR:-/etc}"
 UNITDIR="${UNITDIR:-/etc/systemd/system}"
+
+# --- detect if running from repo or piped ---
+find_repo_dir() {
+    if [[ -f "./src/mihomoctl" && -f "./Makefile" ]]; then
+        echo "$(pwd)"
+    elif [[ -f "./install.sh" && -d "./src" ]]; then
+        echo "$(pwd)"
+    else
+        echo ""
+    fi
+}
+
+clone_repo() {
+    info "Cloning mihomoctl to $INSTALL_DIR..."
+    if [[ -d "$INSTALL_DIR/.git" ]]; then
+        info "Repository already exists at $INSTALL_DIR, pulling..."
+        git -C "$INSTALL_DIR" pull --ff-only || error "Git pull failed"
+    else
+        mkdir -p "$(dirname "$INSTALL_DIR")"
+        git clone "$REPO" "$INSTALL_DIR"
+    fi
+    echo "$INSTALL_DIR"
+}
 
 # --- detect package manager ---
 detect_pkg_manager() {
@@ -61,6 +85,11 @@ install_deps() {
 }
 
 install_mihomo() {
+    if [[ -x "$BINDIR/mihomo" ]]; then
+        info "mihomo already installed: $BINDIR/mihomo"
+        return
+    fi
+
     info "Downloading mihomo..."
     local arch
     arch="$(uname -m)"
@@ -112,15 +141,17 @@ install_mihomo() {
 }
 
 install_files() {
+    local repo_dir="$1"
+
     info "Installing mihomoctl..."
-    install -Dm755 "$SCRIPT_DIR/src/mihomoctl" "$BINDIR/mihomoctl"
+    install -Dm755 "$repo_dir/src/mihomoctl" "$BINDIR/mihomoctl"
 
     info "Installing mihomo-update-config..."
-    install -Dm755 "$SCRIPT_DIR/lib/mihomo-update-config" "$SBINDIR/mihomo-update-config"
+    install -Dm755 "$repo_dir/lib/mihomo-update-config" "$SBINDIR/mihomo-update-config"
 
     info "Installing systemd units..."
     for f in mihomo.service mihomo-update.service mihomo-update.timer; do
-        install -Dm644 "$SCRIPT_DIR/systemd/$f" "$UNITDIR/$f"
+        install -Dm644 "$repo_dir/systemd/$f" "$UNITDIR/$f"
     done
 
     mkdir -p "$SYSCONFDIR/mihomo"
@@ -130,7 +161,9 @@ install_files() {
 enable_services() {
     info "Reloading systemd..."
     systemctl daemon-reload
+}
 
+show_install_complete() {
     echo ""
     info "Installation complete!"
     echo ""
@@ -147,6 +180,9 @@ enable_services() {
     echo "     mihomoctl group profile    # pick routing profile"
     echo "     mihomoctl node pick        # pick node in current group"
     echo "     mihomoctl mode tun|proxy   # switch mode"
+    echo ""
+    echo "  Update:  curl -fsSL $REPO/raw/master/install.sh | sudo bash -s -- --update"
+    echo "  Remove:  curl -fsSL $REPO/raw/master/install.sh | sudo bash -s -- --remove"
     echo ""
 }
 
@@ -178,8 +214,95 @@ download_roscomvpn() {
     esac
 }
 
-install_deps
-install_mihomo
-install_files
-download_roscomvpn
-enable_services
+do_install() {
+    local repo_dir
+    repo_dir="$(find_repo_dir)"
+
+    if [[ -z "$repo_dir" ]]; then
+        info "Not running from repository, cloning..."
+        repo_dir="$(clone_repo)"
+    fi
+
+    install_deps
+    install_mihomo
+    install_files "$repo_dir"
+    download_roscomvpn
+    enable_services
+    show_install_complete
+}
+
+do_update() {
+    if [[ ! -d "$INSTALL_DIR/.git" ]]; then
+        error "Repository not found at $INSTALL_DIR. Run install first."
+    fi
+
+    info "Updating mihomoctl..."
+    git -C "$INSTALL_DIR" pull --ff-only || error "Git pull failed"
+    install_files "$INSTALL_DIR"
+    enable_services
+
+    info "Update complete!"
+    if systemctl is-active --quiet mihomo.service 2>/dev/null; then
+        systemctl restart mihomo.service
+        info "mihomo service restarted"
+    fi
+}
+
+do_remove() {
+    info "Removing mihomoctl..."
+    rm -f "$BINDIR/mihomoctl"
+    rm -f "$SBINDIR/mihomo-update-config"
+    rm -f "$UNITDIR/mihomo.service"
+    rm -f "$UNITDIR/mihomo-update.service"
+    rm -f "$UNITDIR/mihomo-update.timer"
+
+    if systemctl is-active --quiet mihomo.service 2>/dev/null; then
+        systemctl stop mihomo.service
+    fi
+    if systemctl is-enabled --quiet mihomo.service 2>/dev/null; then
+        systemctl disable mihomo.service
+    fi
+
+    systemctl daemon-reload 2>/dev/null || true
+
+    echo ""
+    info "mihomoctl removed."
+    echo ""
+    echo "Remaining (manual removal if needed):"
+    echo "  $BINDIR/mihomo"
+    echo "  $SYSCONFDIR/mihomo/"
+    echo "  /var/lib/mihomoctl/"
+    echo "  $INSTALL_DIR/"
+    echo ""
+    echo "To remove everything:"
+    echo "  sudo rm -rf $SYSCONFDIR/mihomo /var/lib/mihomoctl $INSTALL_DIR $BINDIR/mihomo"
+    echo ""
+}
+
+# --- main ---
+ACTION="${1:-install}"
+case "$ACTION" in
+    --update|-u)  do_update ;;
+    --remove|-r)  do_remove ;;
+    --help|-h)
+        echo "Usage: install.sh [OPTION]"
+        echo ""
+        echo "Options:"
+        echo "  (no args)   Full install"
+        echo "  --update    Update mihomoctl from git"
+        echo "  --remove    Remove mihomoctl"
+        echo "  --help      Show this help"
+        echo ""
+        echo "One-liner install:"
+        echo "  curl -fsSL $REPO/raw/master/install.sh | sudo bash"
+        echo ""
+        echo "One-liner update:"
+        echo "  curl -fsSL $REPO/raw/master/install.sh | sudo bash -s -- --update"
+        echo ""
+        echo "One-liner remove:"
+        echo "  curl -fsSL $REPO/raw/master/install.sh | sudo bash -s -- --remove"
+        echo ""
+        ;;
+    install)      do_install ;;
+    *)            error "Unknown option: $ACTION. Use --help for usage." ;;
+esac

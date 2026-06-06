@@ -14,14 +14,31 @@ mihomoctl позволяет управлять демоном Mihomo прокс
 
 ## Быстрый старт
 
+**Однострочная установка:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh | sudo bash
+```
+
+**Однострочное обновление:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh | sudo bash -s -- --update
+```
+
+**Однострочное удаление:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh | sudo bash -s -- --remove
+```
+
+**Ручная установка (из клонирования):**
+
 ```bash
 git clone https://github.com/MrJefter/mihomoctl.git
 cd mihomoctl
 sudo make install
-sudo ./install.sh          # ставит зависимости, mihomo, опционально шаблон RoscomVPN
-sudo mihomoctl enable      # запускает mihomo
-sudo mihomoctl group pick  # выбирает группу прокси
-sudo mihomoctl node pick   # выбирает ноду
+sudo ./install.sh
 ```
 
 ## Содержание
@@ -207,7 +224,13 @@ sudo systemctl enable --now mihomo-update.timer  # опционально, ав�
 ## Обновление
 
 ```bash
-cd /путь/к/mihomoctl
+curl -fsSL https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh | sudo bash -s -- --update
+```
+
+Или вручную:
+
+```bash
+cd ~/.local/share/mihomoctl
 sudo make update
 sudo mihomoctl restart
 ```
@@ -217,13 +240,14 @@ sudo mihomoctl restart
 ## Удаление
 
 ```bash
-sudo make uninstall
+curl -fsSL https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh | sudo bash -s -- --remove
 ```
 
-Затем опционально удалите конфиг и состояние:
+Или вручную:
 
 ```bash
-sudo rm -rf /etc/mihomo /var/lib/mihomoctl
+sudo make uninstall
+sudo rm -rf /etc/mihomo /var/lib/mihomoctl ~/.local/share/mihomoctl
 ```
 
 ## Решение проблем

@@ -14,14 +14,31 @@ Built for Linux systems with systemd (Ubuntu, Fedora, Arch, Debian, etc.).
 
 ## Quick Start
 
+**One-liner install:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh | sudo bash
+```
+
+**One-liner update:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh | sudo bash -s -- --update
+```
+
+**One-liner remove:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh | sudo bash -s -- --remove
+```
+
+**Manual install (from clone):**
+
 ```bash
 git clone https://github.com/MrJefter/mihomoctl.git
 cd mihomoctl
 sudo make install
-sudo ./install.sh          # installs deps, mihomo, optionally RoscomVPN template
-sudo mihomoctl enable      # start mihomo
-sudo mihomoctl group pick  # choose your proxy group
-sudo mihomoctl node pick   # choose a node
+sudo ./install.sh
 ```
 
 ## Table of Contents
@@ -207,7 +224,13 @@ sudo systemctl enable --now mihomo-update.timer  # optional, auto-updates subscr
 ## Updating
 
 ```bash
-cd /path/to/mihomoctl
+curl -fsSL https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh | sudo bash -s -- --update
+```
+
+Or manually:
+
+```bash
+cd ~/.local/share/mihomoctl
 sudo make update
 sudo mihomoctl restart
 ```
@@ -217,13 +240,14 @@ This pulls the latest code and reinstalls files. Your config and state are prese
 ## Uninstall
 
 ```bash
-sudo make uninstall
+curl -fsSL https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh | sudo bash -s -- --remove
 ```
 
-Then optionally remove config and state:
+Or manually:
 
 ```bash
-sudo rm -rf /etc/mihomo /var/lib/mihomoctl
+sudo make uninstall
+sudo rm -rf /etc/mihomo /var/lib/mihomoctl ~/.local/share/mihomoctl
 ```
 
 ## Troubleshooting
