@@ -61,16 +61,6 @@ install_deps() {
 }
 
 install_mihomo() {
-    if command -v mihomo &>/dev/null; then
-        info "mihomo already installed: $(command -v mihomo)"
-        return
-    fi
-
-    if [[ -x "$BINDIR/mihomo" ]]; then
-        info "mihomo already at $BINDIR/mihomo"
-        return
-    fi
-
     info "Downloading mihomo..."
     local arch
     arch="$(uname -m)"
