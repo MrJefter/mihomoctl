@@ -12,3 +12,7 @@ state.json
 .vscode/
 .idea/
 .plan.md
+.pytest_cache/
+*.egg-info/
+htmlcov/
+.coverage
