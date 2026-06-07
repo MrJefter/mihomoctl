@@ -333,7 +333,7 @@ def cmd_node_pick(args):
 
     result = fzf_select(items, f"{group}> ")
     if not result:
-        raise SystemExit(1)
+        raise SystemExit(EXIT_OK)
 
     node = result.lstrip("* ").strip()
 
@@ -341,6 +341,84 @@ def cmd_node_pick(args):
 
     state["node"] = node
     write_state(state)
+
+
+def test_node_latency(group, node):
+    """Returns latency in ms or None on timeout."""
+    try:
+        path = f"/proxies/{urllib.parse.quote(group, safe='')}/delay"
+        params = f"timeout=5000&url=http://www.gstatic.com/generate_204&target={urllib.parse.quote(node, safe='')}"
+        data = http_json("GET", f"{path}?{params}")
+        return data.get("delay")
+    except Exception:
+        return None
+
+
+def cmd_node_test(args):
+    state = read_state()
+    group = state.get("group")
+    if not group:
+        die("no default group set. Run: mihomoctl group pick", EXIT_NOT_FOUND)
+
+    proxies = get_proxies()
+
+    if args.all:
+        nodes = get_group_nodes(group, proxies)
+    else:
+        current = proxies[group].get("now")
+        if not current:
+            die("no node selected in group", EXIT_NOT_FOUND)
+        nodes = [current]
+
+    # Test nodes with progress indicator
+    results = []
+    if args.all:
+        print(f"\n  Testing {len(nodes)} nodes in {group}...")
+        for i, node in enumerate(nodes, 1):
+            sys.stdout.write(f"\r  [{i}/{len(nodes)}] {node}...")
+            sys.stdout.flush()
+            latency = test_node_latency(group, node)
+            results.append((node, latency))
+        sys.stdout.write("\r" + " " * 50 + "\r")
+        sys.stdout.flush()
+    else:
+        node = nodes[0]
+        sys.stdout.write(f"\r  Testing {node}...")
+        sys.stdout.flush()
+        latency = test_node_latency(group, node)
+        results.append((node, latency))
+        sys.stdout.write("\r" + " " * 50 + "\r")
+        sys.stdout.flush()
+
+    if not results:
+        die("no results", EXIT_GENERAL)
+
+    # Show results in fzf or formatted table
+    if args.all and shutil.which("fzf"):
+        items = []
+        for node, lat in results:
+            lat_str = f"{lat}ms" if lat else "timeout"
+            marker = "* " if node == proxies[group].get("now") else "  "
+            items.append(f"{marker}{node:<30} {lat_str:>10}")
+        # Sort: timeouts last, then by latency
+        items.sort(key=lambda x: ("timeout" in x, x))
+
+        p = subprocess.run(
+            ["fzf", "--prompt", f"{group} results> ", "--no-sort"],
+            input="\n".join(items) + "\n",
+            text=True,
+            stdout=subprocess.PIPE,
+        )
+    else:
+        # Fallback: formatted table
+        results.sort(key=lambda x: x[1] if x[1] else float('inf'))
+        print(f"\n  {'node':<30} {'latency':>10}")
+        print(f"  {'-'*42}")
+        for node, lat in results:
+            lat_str = f"{lat}ms" if lat else "timeout"
+            marker = "* " if node == proxies[group].get("now") else "  "
+            print(f"  {marker}{node:<28} {lat_str:>10}")
+    print()
 
 
 def cmd_group_pick(args):
@@ -716,6 +794,10 @@ def main():
     n = sub.add_parser("node")
     nsub = n.add_subparsers(dest="node_cmd", required=True)
     nsub.add_parser("pick").set_defaults(fn=cmd_node_pick)
+
+    test_parser = nsub.add_parser("test")
+    test_parser.add_argument("--all", action="store_true")
+    test_parser.set_defaults(fn=cmd_node_test)
 
     sub.add_parser("enable").set_defaults(fn=cmd_enable)
     sub.add_parser("disable").set_defaults(fn=cmd_disable)
