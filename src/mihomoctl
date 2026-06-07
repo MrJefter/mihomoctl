@@ -317,7 +317,7 @@ def get_group_nodes(group, proxies):
     if not is_group(obj):
         die(f"not a proxy group: {group}", EXIT_NOT_FOUND)
 
-    nodes = [x for x in group_members(obj) if is_node_name(x, proxies)]
+    nodes = group_members(obj)
     if not nodes:
         die(f"group has no selectable nodes: {group}", EXIT_NOT_FOUND)
     return nodes
