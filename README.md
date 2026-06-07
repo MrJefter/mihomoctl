@@ -12,6 +12,30 @@ mihomoctl lets you control a Mihomo proxy daemon entirely from the command line.
 
 Built for Linux systems with systemd (Ubuntu, Fedora, Arch, Debian, etc.).
 
+## How is this different from vika2603/mihomoctl?
+
+There's another project called [mihomoctl](https://github.com/vika2603/mihomoctl) — a Go-based API client for managing running mihomo instances. It's a great tool, but serves a different purpose.
+
+**This project (MrJefter/mihomoctl):**
+- Focuses on **installation and subscription management**
+- Manages mihomo as a systemd service
+- Handles remnawave/RoscomVPN config setup
+- One-liner install with distro auto-detection
+- Interactive fzf-based node/group pickers
+- Written in Python + Bash
+
+**vika2603/mihomoctl:**
+- Focuses on **runtime API management**
+- Talks to mihomo's external-controller API
+- Proxy switching, connections, DNS, rules, providers
+- Single Go binary, no config files
+- JSON output for scripting
+- Written in Go
+
+They can be used together: this project to set up mihomo, vika2603's for advanced runtime management.
+
+*Note: I didn't know about vika2603/mihomoctl when I created this project. It existed locally on my laptop for 2 months before I pushed it to GitHub.*
+
 ## Quick Start
 
 **Install or update:**
