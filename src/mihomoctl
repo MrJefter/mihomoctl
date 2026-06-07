@@ -150,9 +150,7 @@ def generate_config():
     dns = cfg.get("dns")
     if not isinstance(dns, dict):
         dns = {}
-
-    dns["enable"] = True
-    dns["ipv6"] = False
+        dns["enable"] = True
 
     if "enhanced-mode" in dns_overrides:
         dns["enhanced-mode"] = dns_overrides["enhanced-mode"]
@@ -663,6 +661,18 @@ def cmd_sub_cycle(args):
         pass
 
     options = ["1h", "2h", "4h", "6h", "12h", "24h", "custom"]
+
+    # Read current value from timer file
+    current = "6h"
+    timer_path = "/etc/systemd/system/mihomo-update.timer"
+    try:
+        content = Path(timer_path).read_text()
+        import re
+        m = re.search(r"OnUnitActiveSec=(.+)", content)
+        if m:
+            current = m.group(1).strip()
+    except Exception:
+        pass
     items = []
     for opt in options:
         prefix = "* " if opt == current else "  "
