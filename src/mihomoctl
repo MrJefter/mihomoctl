@@ -25,6 +25,15 @@ STATE = VAR / "state.json"
 CONTROLLER = "http://127.0.0.1:9090"
 MIXED_PORT = 7890
 
+# Exit codes
+EXIT_OK = 0
+EXIT_GENERAL = 1
+EXIT_NOT_FOUND = 2
+EXIT_API_DOWN = 3
+EXIT_AUTH_FAILED = 4
+EXIT_INVALID_INPUT = 5
+EXIT_DEPENDENCY = 6
+
 GROUP_TYPES = {
     "selector", "select",
 }
@@ -41,7 +50,7 @@ def die(msg, code=1):
 
 def need_root(action):
     if os.geteuid() != 0:
-        die(f"{action} needs root. Run: sudo mihomoctl ...")
+        die(f"{action} needs root. Run: sudo mihomoctl ...", EXIT_DEPENDENCY)
 
 
 def read_state():
@@ -60,10 +69,10 @@ def write_state(state):
 
 def load_yaml(path):
     if not path.exists():
-        die(f"{path} does not exist")
+        die(f"{path} does not exist", EXIT_NOT_FOUND)
     data = yaml.safe_load(path.read_text()) or {}
     if not isinstance(data, dict):
-        die(f"{path} is not a YAML object")
+        die(f"{path} is not a YAML object", EXIT_INVALID_INPUT)
     return data
 
 
@@ -220,7 +229,7 @@ def wait_api(timeout=20):
         except Exception as e:
             last = e
             time.sleep(0.5)
-    die(f"mihomo API is not responding at {CONTROLLER}: {last}")
+    die(f"mihomo API is not responding at {CONTROLLER}: {last}", EXIT_API_DOWN)
 
 
 def get_proxies():
@@ -228,7 +237,7 @@ def get_proxies():
     data = http_json("GET", "/proxies")
     proxies = data.get("proxies") if isinstance(data, dict) else None
     if not isinstance(proxies, dict):
-        die("bad /proxies response")
+        die("bad /proxies response", EXIT_API_DOWN)
     return proxies
 
 
@@ -270,11 +279,11 @@ def candidate_groups(proxies):
 def get_group_nodes(group, proxies):
     obj = proxies.get(group)
     if not is_group(obj):
-        die(f"not a proxy group: {group}")
+        die(f"not a proxy group: {group}", EXIT_NOT_FOUND)
 
     nodes = [x for x in obj.get("all", []) if is_node_name(x, proxies)]
     if not nodes:
-        die(f"group has no selectable nodes: {group}")
+        die(f"group has no selectable nodes: {group}", EXIT_NOT_FOUND)
     return nodes
 
 
@@ -312,7 +321,7 @@ def cmd_node_pick(args):
 
     group = state.get("group")
     if not group:
-        die("no default group set. Run: mihomoctl group pick")
+        die("no default group set. Run: mihomoctl group pick", EXIT_NOT_FOUND)
 
     nodes = get_group_nodes(group, proxies)
     now = proxies[group].get("now", "")
@@ -340,7 +349,7 @@ def cmd_group_pick(args):
 
     groups = candidate_groups(proxies)
     if not groups:
-        die("no selectable proxy groups found")
+        die("no selectable proxy groups found", EXIT_NOT_FOUND)
 
     items = []
     for name, obj, nodes in groups:
@@ -365,7 +374,7 @@ def cmd_group_profile(args):
 
     groups = candidate_groups(proxies)
     if not groups:
-        die("no selectable proxy groups found")
+        die("no selectable proxy groups found", EXIT_NOT_FOUND)
 
     items = []
     for name, obj, nodes in groups:
@@ -387,7 +396,7 @@ def cmd_group_profile(args):
             sub_items.append(f"{now_mark}{n}")
 
     if not sub_items:
-        die(f"no selectable options in profile: {profile}")
+        die(f"no selectable options in profile: {profile}", EXIT_NOT_FOUND)
 
     sub_result = fzf_select(sub_items, f"{profile}> ")
     if not sub_result:
@@ -459,7 +468,7 @@ def cmd_mode(args):
         return
 
     if args.value not in {"tun", "proxy"}:
-        die("mode must be: tun or proxy")
+        die("mode must be: tun or proxy", EXIT_INVALID_INPUT)
 
     need_root("changing mode")
 
@@ -482,7 +491,7 @@ def cmd_sub_set(args):
         url = getpass.getpass("Paste Mihomo/Clash subscription URL: ")
 
     if not url.startswith(("http://", "https://")):
-        die("subscription URL must start with http:// or https://")
+        die("subscription URL must start with http:// or https://", EXIT_INVALID_INPUT)
 
     ETC.mkdir(parents=True, exist_ok=True)
     SUB_URL.write_text(url.strip() + "\n")
@@ -495,11 +504,11 @@ def cmd_sub_update(args):
     need_root("updating subscription")
 
     if not SUB_URL.exists():
-        die("subscription URL missing. Run: sudo mihomoctl sub set")
+        die("subscription URL missing. Run: sudo mihomoctl sub set", EXIT_NOT_FOUND)
 
     url = SUB_URL.read_text().strip()
     if not url:
-        die("subscription URL is empty")
+        die("subscription URL is empty", EXIT_INVALID_INPUT)
 
     print("downloading subscription...")
     req = urllib.request.Request(url, headers={"User-Agent": "mihomo/1.0"})
@@ -507,15 +516,15 @@ def cmd_sub_update(args):
         with urllib.request.urlopen(req, timeout=60) as r:
             content = r.read().decode()
     except urllib.error.URLError as e:
-        die(f"download failed: {e}")
+        die(f"download failed: {e}", EXIT_API_DOWN)
 
     data = yaml.safe_load(content)
     if not isinstance(data, dict):
-        die("downloaded subscription is not a YAML object")
+        die("downloaded subscription is not a YAML object", EXIT_INVALID_INPUT)
 
     if not any(k in data for k in ("proxies", "proxy-providers", "proxy-groups", "rules")):
         print(content[:1000], file=sys.stderr)
-        die("downloaded file does not look like a Mihomo/Clash YAML config")
+        die("downloaded file does not look like a Mihomo/Clash YAML config", EXIT_INVALID_INPUT)
 
     BASE_CFG.write_text(content)
     os.chmod(BASE_CFG, 0o600)
