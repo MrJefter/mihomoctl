@@ -55,11 +55,11 @@ def need_root(action):
 
 def read_state():
     if not STATE.exists():
-        return {"mode": "tun", "group": None, "node": None, "profile": None}
+        return {"mode": "tun", "group": None, "node": None}
     try:
         return json.loads(STATE.read_text())
     except Exception:
-        return {"mode": "tun", "group": None, "node": None, "profile": None}
+        return {"mode": "tun", "group": None, "node": None}
 
 
 def write_state(state):
@@ -294,6 +294,16 @@ def candidate_groups(proxies):
     return groups
 
 
+def all_groups(proxies):
+    groups = []
+    for name, obj in proxies.items():
+        if is_group(obj):
+            nodes = [x for x in obj.get("all", []) if is_node_name(x, proxies)]
+            if nodes:
+                groups.append((name, obj, nodes))
+    return groups
+
+
 def get_group_nodes(group, proxies):
     obj = proxies.get(group)
     if not is_group(obj):
@@ -339,7 +349,7 @@ def cmd_node_pick(args):
 
     group = state.get("group")
     if not group:
-        die("no default group set. Run: mihomoctl group pick", EXIT_NOT_FOUND)
+        die("no default group set. Run: mihomoctl node group", EXIT_NOT_FOUND)
 
     nodes = get_group_nodes(group, proxies)
     now = proxies[group].get("now", "")
@@ -376,7 +386,7 @@ def cmd_node_test(args):
     state = read_state()
     group = state.get("group")
     if not group:
-        die("no default group set. Run: mihomoctl group pick", EXIT_NOT_FOUND)
+        die("no default group set. Run: mihomoctl node group", EXIT_NOT_FOUND)
 
     proxies = get_proxies()
 
@@ -439,70 +449,47 @@ def cmd_node_test(args):
     print()
 
 
-def cmd_group_pick(args):
+def cmd_node_group(args):
     proxies = get_proxies()
     state = read_state()
 
-    groups = candidate_groups(proxies)
+    groups = all_groups(proxies)
     if not groups:
-        die("no selectable proxy groups found", EXIT_NOT_FOUND)
+        die("no proxy groups found", EXIT_NOT_FOUND)
 
     items = []
     for name, obj, nodes in groups:
         prefix = "* " if name == state.get("group") else "  "
-        now = obj.get("now", "")
-        items.append(f"{prefix}{name}  ({len(nodes)} nodes, now={now})")
+        t = str(obj.get("type", "")).lower()
+        items.append(f"{prefix}{name}  ({t}, {len(nodes)} nodes)")
 
     result = fzf_select(items, "group> ")
     if not result:
-        raise SystemExit(1)
+        raise SystemExit(EXIT_OK)
 
     group = result.split("  ")[0].lstrip("* ").strip()
 
+    # Pick node within group
+    nodes = [x for x in proxies[group].get("all", []) if is_node_name(x, proxies)]
+    if not nodes:
+        die(f"group has no selectable nodes: {group}", EXIT_NOT_FOUND)
+
+    node_items = []
+    current = proxies[group].get("now", "")
+    for n in nodes:
+        prefix = "* " if n == current else "  "
+        node_items.append(f"{prefix}{n}")
+
+    node_result = fzf_select(node_items, f"{group}> ")
+    if not node_result:
+        raise SystemExit(EXIT_OK)
+
+    node = node_result.lstrip("* ").strip()
+
+    select_node(group, node)
+
     state["group"] = group
-    write_state(state)
-    print(f"default group: {group}")
-
-
-def cmd_group_profile(args):
-    proxies = get_proxies()
-    state = read_state()
-
-    groups = candidate_groups(proxies)
-    if not groups:
-        die("no selectable proxy groups found", EXIT_NOT_FOUND)
-
-    items = []
-    for name, obj, nodes in groups:
-        prefix = "* " if name == state.get("profile") else "  "
-        now = obj.get("now", "")
-        items.append(f"{prefix}{name}  (now={now})")
-
-    result = fzf_select(items, "profile> ")
-    if not result:
-        raise SystemExit(1)
-
-    profile = result.split("  ")[0].lstrip("* ").strip()
-
-    sub_items = []
-    obj = proxies.get(profile)
-    if is_group(obj):
-        for n in obj.get("all", []):
-            now_mark = "* " if n == obj.get("now") else "  "
-            sub_items.append(f"{now_mark}{n}")
-
-    if not sub_items:
-        die(f"no selectable options in profile: {profile}", EXIT_NOT_FOUND)
-
-    sub_result = fzf_select(sub_items, f"{profile}> ")
-    if not sub_result:
-        raise SystemExit(1)
-
-    node = sub_result.lstrip("* ").strip()
-
-    select_node(profile, node)
-
-    state["profile"] = profile
+    state["node"] = node
     write_state(state)
 
 
@@ -572,11 +559,9 @@ def cmd_status(args):
     print("\033[1m── Routing ──────────────\033[0m")
     group = state.get("group")
     node = state.get("node")
-    profile = state.get("profile")
     not_set = "\033[33mnot set\033[0m"
     print(f"  group:      {group or not_set}")
     print(f"  node:       {node or not_set}")
-    print(f"  profile:    {profile or not_set}")
 
     # Network section
     print()
@@ -906,13 +891,9 @@ def main():
 
     sub.add_parser("status").set_defaults(fn=cmd_status)
 
-    g = sub.add_parser("group")
-    gsub = g.add_subparsers(dest="group_cmd", required=True)
-    gsub.add_parser("pick").set_defaults(fn=cmd_group_pick)
-    gsub.add_parser("profile").set_defaults(fn=cmd_group_profile)
-
     n = sub.add_parser("node")
     nsub = n.add_subparsers(dest="node_cmd", required=True)
+    nsub.add_parser("group").set_defaults(fn=cmd_node_group)
     nsub.add_parser("pick").set_defaults(fn=cmd_node_pick)
 
     test_parser = nsub.add_parser("test")
