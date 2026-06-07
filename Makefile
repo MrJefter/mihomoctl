@@ -10,6 +10,9 @@ SBIN_DIR     = $(DESTDIR)$(SBINDIR)
 CONF_DIR     = $(DESTDIR)$(SYSCONFDIR)/mihomo
 UNIT_DIR     = $(DESTDIR)$(UNITDIR)
 STATE_DIR    = $(DESTDIR)/var/lib/mihomoctl
+BASH_COMPLETION_DIR = $(DESTDIR)/etc/bash_completion.d
+ZSH_COMPLETION_DIR  = $(DESTDIR)/usr/share/zsh/site-functions
+FISH_COMPLETION_DIR = $(DESTDIR)/usr/share/fish/vendor_completions.d
 
 .PHONY: help install uninstall
 
@@ -41,6 +44,13 @@ install:
 	@install -Dm644 systemd/mihomo.service          $(UNIT_DIR)/mihomo.service
 	@install -Dm644 systemd/mihomo-update.service   $(UNIT_DIR)/mihomo-update.service
 	@install -Dm644 systemd/mihomo-update.timer     $(UNIT_DIR)/mihomo-update.timer
+	@echo "Installing shell completions..."
+	@mkdir -p $(BASH_COMPLETION_DIR)
+	@install -Dm644 lib/mihomoctl-completion.bash $(BASH_COMPLETION_DIR)/mihomoctl
+	@mkdir -p $(ZSH_COMPLETION_DIR)
+	@install -Dm644 lib/mihomoctl-completion.zsh $(ZSH_COMPLETION_DIR)/_mihomoctl
+	@mkdir -p $(FISH_COMPLETION_DIR)
+	@install -Dm644 lib/mihomoctl-completion.fish $(FISH_COMPLETION_DIR)/mihomoctl.fish
 	@mkdir -p $(CONF_DIR)
 	@mkdir -p $(STATE_DIR)
 	@systemctl daemon-reload 2>/dev/null || true
@@ -56,6 +66,10 @@ uninstall:
 	@rm -f $(UNIT_DIR)/mihomo.service
 	@rm -f $(UNIT_DIR)/mihomo-update.service
 	@rm -f $(UNIT_DIR)/mihomo-update.timer
+	@echo "Removing shell completions..."
+	@rm -f $(BASH_COMPLETION_DIR)/mihomoctl
+	@rm -f $(ZSH_COMPLETION_DIR)/_mihomoctl
+	@rm -f $(FISH_COMPLETION_DIR)/mihomoctl.fish
 	@systemctl daemon-reload 2>/dev/null || true
 	@echo ""
 	@echo "Remaining (manual removal if needed):"
