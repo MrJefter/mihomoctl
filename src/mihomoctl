@@ -487,7 +487,7 @@ def cmd_status(args):
             print(f"  url:        {display_url}")
 
             # Check subscription age
-            age_hours = (time.time() - SUB_URL.stat().st_mtime) / 3600
+            age_hours = (time.time() - BASE_CFG.stat().st_mtime) / 3600
             if age_hours > 24:
                 age_str = f"{int(age_hours)}h ago"
                 print(f"  last update: \033[33m{age_str} (run: sudo mihomoctl sub update)\033[0m")
