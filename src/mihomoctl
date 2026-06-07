@@ -624,6 +624,75 @@ def cmd_restart(args):
     print("mihomo restarted")
 
 
+def cmd_sub_cycle(args):
+    need_root("changing update cycle")
+
+    # Read current timer interval
+    current = "6h"
+    try:
+        result = subprocess.run(
+            ["systemctl", "show", "mihomo-update.timer", "--property=OnUnitActiveSec"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            val = result.stdout.split("=", 1)[1].strip()
+            if val:
+                current = val
+    except Exception:
+        pass
+
+    options = ["1h", "2h", "4h", "6h", "12h", "24h", "custom"]
+    items = []
+    for opt in options:
+        prefix = "* " if opt == current else "  "
+        items.append(f"{prefix}{opt}")
+
+    result = fzf_select(items, "update cycle> ")
+    if not result:
+        raise SystemExit(EXIT_OK)
+
+    choice = result.lstrip("* ").strip()
+
+    if choice == "custom":
+        if sys.stdin.isatty():
+            choice = input("Enter interval (e.g., 30m, 2h, 1d): ").strip()
+            if not choice:
+                print("  aborted")
+                raise SystemExit(EXIT_OK)
+        else:
+            die("custom interval requires interactive terminal", EXIT_INVALID_INPUT)
+
+    # Parse interval to systemd format
+    # Supported: Xm, Xh, Xd
+    if not any(choice.endswith(("m", "h", "d"))):
+        die("interval must end with m (minutes), h (hours), or d (days)", EXIT_INVALID_INPUT)
+
+    # Update timer unit
+    timer_path = "/etc/systemd/system/mihomo-update.timer"
+    try:
+        with open(timer_path, "r") as f:
+            content = f.read()
+
+        import re
+        new_content = re.sub(
+            r"OnUnitActiveSec=.*",
+            f"OnUnitActiveSec={choice}",
+            content
+        )
+
+        with open(timer_path, "w") as f:
+            f.write(new_content)
+
+        # Reload systemd and restart timer
+        subprocess.run(["systemctl", "daemon-reload"], check=True)
+        if subprocess.run(["systemctl", "is-active", "--quiet", "mihomo-update.timer"]).returncode == 0:
+            subprocess.run(["systemctl", "restart", "mihomo-update.timer"], check=True)
+
+        print(f"  update cycle set to: {choice}")
+    except Exception as e:
+        die(f"failed to update timer: {e}", EXIT_GENERAL)
+
+
 def cmd_logs(args):
     try:
         subprocess.run(["journalctl", "-u", "mihomo.service", "-f", "-o", "cat"])
@@ -664,6 +733,9 @@ def main():
 
     su = ssub.add_parser("update")
     su.set_defaults(fn=cmd_sub_update)
+
+    sc = ssub.add_parser("cycle")
+    sc.set_defaults(fn=cmd_sub_cycle)
 
     sub.add_parser("restart").set_defaults(fn=cmd_restart)
     sub.add_parser("logs").set_defaults(fn=cmd_logs)
