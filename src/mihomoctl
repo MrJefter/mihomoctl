@@ -43,7 +43,7 @@ NON_NODE_NAMES = {
 }
 
 
-def die(msg, code=1):
+def die(msg, code=EXIT_GENERAL):
     print(f"error: {msg}", file=sys.stderr)
     raise SystemExit(code)
 
@@ -482,6 +482,21 @@ def cmd_mode(args):
     print(f"mode switched to: {args.value}")
 
 
+def validate_sub_url(url):
+    """Validate subscription URL. Returns (ok: bool, message: str)."""
+    try:
+        req = urllib.request.Request(url, method="HEAD",
+                                      headers={"User-Agent": "mihomo/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return True, f"HTTP {r.status}"
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return True, f"HTTP {e.code} (auth required, but URL exists)"
+        return False, f"HTTP {e.code}"
+    except Exception as e:
+        return False, str(e)
+
+
 def cmd_sub_set(args):
     need_root("setting subscription URL")
 
@@ -493,11 +508,25 @@ def cmd_sub_set(args):
     if not url.startswith(("http://", "https://")):
         die("subscription URL must start with http:// or https://", EXIT_INVALID_INPUT)
 
+    # Validate URL
+    print("validating URL...", end="", flush=True)
+    ok, msg = validate_sub_url(url)
+    if ok:
+        print(f"\r  \033[32m\033[1m✓\033[0m URL reachable ({msg})")
+    else:
+        print(f"\r  \033[31m\033[1m✗\033[0m URL unreachable ({msg})")
+        if not sys.stdin.isatty():
+            die("URL not reachable and running non-interactively", EXIT_INVALID_INPUT)
+        answer = input("  Save anyway? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("  aborted")
+            raise SystemExit(EXIT_OK)
+
     ETC.mkdir(parents=True, exist_ok=True)
     SUB_URL.write_text(url.strip() + "\n")
     os.chmod(SUB_URL, 0o600)
 
-    print(f"saved: {SUB_URL}")
+    print(f"  saved: {SUB_URL}")
 
 
 def cmd_sub_update(args):
