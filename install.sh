@@ -27,17 +27,6 @@ SBINDIR="${SBINDIR:-$PREFIX/sbin}"
 SYSCONFDIR="${SYSCONFDIR:-/etc}"
 UNITDIR="${UNITDIR:-/etc/systemd/system}"
 
-# --- detect if running from repo or piped ---
-find_repo_dir() {
-    if [[ -f "./src/mihomoctl" && -f "./Makefile" ]]; then
-        echo "$(pwd)"
-    elif [[ -f "./install.sh" && -d "./src" ]]; then
-        echo "$(pwd)"
-    else
-        echo ""
-    fi
-}
-
 clone_repo() {
     info "Cloning mihomoctl to $INSTALL_DIR..."
     if [[ -d "$INSTALL_DIR/.git" ]]; then
@@ -289,13 +278,13 @@ case "$ACTION" in
         echo "  --help      Show this help"
         echo ""
         echo "One-liner install:"
-        echo "  curl -fsSL $REPO/raw/master/install.sh | sudo bash"
+        echo "  curl -fsSL \"$REPO/raw/master/install.sh?v=\$(date +%s)\" | sudo bash"
         echo ""
         echo "One-liner update:"
-        echo "  curl -fsSL $REPO/raw/master/install.sh | sudo bash -s -- --update"
+        echo "  curl -fsSL \"$REPO/raw/master/install.sh?v=\$(date +%s)\" | sudo bash -s -- --update"
         echo ""
         echo "One-liner remove:"
-        echo "  curl -fsSL $REPO/raw/master/install.sh | sudo bash -s -- --remove"
+        echo "  curl -fsSL \"$REPO/raw/master/install.sh?v=\$(date +%s)\" | sudo bash -s -- --remove"
         echo ""
         ;;
     install)      do_install ;;

@@ -17,19 +17,19 @@ Built for Linux systems with systemd (Ubuntu, Fedora, Arch, Debian, etc.).
 **One-liner install:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh | sudo bash
+curl -fsSL "https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh?v=$(date +%s)" | sudo bash
 ```
 
 **One-liner update:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh | sudo bash -s -- --update
+curl -fsSL "https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh?v=$(date +%s)" | sudo bash -s -- --update
 ```
 
 **One-liner remove:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh | sudo bash -s -- --remove
+curl -fsSL "https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh?v=$(date +%s)" | sudo bash -s -- --remove
 ```
 
 **Manual install (from clone):**

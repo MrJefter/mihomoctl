@@ -17,19 +17,19 @@ mihomoctl позволяет управлять демоном Mihomo прокс
 **Однострочная установка:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh | sudo bash
+curl -fsSL "https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh?v=$(date +%s)" | sudo bash
 ```
 
 **Однострочное обновление:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh | sudo bash -s -- --update
+curl -fsSL "https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh?v=$(date +%s)" | sudo bash -s -- --update
 ```
 
 **Однострочное удаление:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh | sudo bash -s -- --remove
+curl -fsSL "https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh?v=$(date +%s)" | sudo bash -s -- --remove
 ```
 
 **Ручная установка (из клонирования):**
