@@ -3,7 +3,10 @@ set -euo pipefail
 
 REPO="https://github.com/MrJefter/mihomoctl.git"
 if [[ -n "${SUDO_USER:-}" ]]; then
-    REAL_HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+    REAL_HOME="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6)"
+    if [[ -z "$REAL_HOME" || ! -d "$REAL_HOME" ]]; then
+        REAL_HOME="$(eval echo "~$SUDO_USER")"
+    fi
 else
     REAL_HOME="$HOME"
 fi
@@ -86,16 +89,16 @@ install_mihomo() {
         x86_64)  arch="amd64" ;;
         aarch64) arch="arm64" ;;
         armv7l)  arch="armv7" ;;
-        *)       error "Unsupported architecture: $arch" ;;
+        *)       error "Unsupported architecture: $arch (supported: x86_64, aarch64, armv7l)" ;;
     esac
 
     local tmpdir
     tmpdir="$(mktemp -d)"
-    trap 'rm -rf "${tmpdir:-}"' EXIT
 
     local tag
     tag="$(curl -sL "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest" | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)"
     if [[ -z "$tag" ]]; then
+        rm -rf "$tmpdir"
         error "Failed to fetch latest mihomo version from GitHub"
     fi
 
@@ -104,23 +107,31 @@ install_mihomo() {
 
     if command -v wget &>/dev/null; then
         if ! wget -q -O "$tmpdir/mihomo.gz" "$url"; then
+            rm -rf "$tmpdir"
             error "Download failed. Check your network or URL: $url"
         fi
     elif command -v curl &>/dev/null; then
         if ! curl -sL -o "$tmpdir/mihomo.gz" "$url"; then
+            rm -rf "$tmpdir"
             error "Download failed. Check your network or URL: $url"
         fi
     else
+        rm -rf "$tmpdir"
         error "Neither wget nor curl found. Install one of them."
     fi
 
     if [[ ! -s "$tmpdir/mihomo.gz" ]]; then
+        rm -rf "$tmpdir"
         error "Downloaded file is empty"
     fi
 
-    gunzip "$tmpdir/mihomo.gz"
+    if ! gunzip "$tmpdir/mihomo.gz"; then
+        rm -rf "$tmpdir"
+        error "Failed to decompress mihomo binary. Download may be corrupted."
+    fi
     chmod +x "$tmpdir/mihomo"
     mv "$tmpdir/mihomo" "$BINDIR/mihomo"
+    rm -rf "$tmpdir"
 
     if command -v restorecon &>/dev/null; then
         restorecon "$BINDIR/mihomo"
@@ -182,6 +193,12 @@ download_roscomvpn() {
         return
     fi
 
+    if [[ ! -t 0 ]]; then
+        info "Running non-interactively, skipping RoscomVPN template."
+        info "Run 'sudo mihomoctl sub set' to configure manually."
+        return
+    fi
+
     echo ""
     read -rp "Download RoscomVPN routing template? [Y/n] " answer
     case "${answer,,}" in
@@ -221,7 +238,15 @@ do_update() {
     fi
 
     info "Updating mihomoctl..."
-    git -C "$INSTALL_DIR" pull --ff-only || error "Git pull failed"
+    if ! git -C "$INSTALL_DIR" pull --ff-only; then
+        echo ""
+        warn "Git pull failed. The local repo may have diverged."
+        echo "  To fix, delete and reinstall:"
+        echo "    sudo rm -rf $INSTALL_DIR"
+        echo "    curl -fsSL \"$REPO/raw/master/install.sh?v=\$(date +%s)\" | sudo bash"
+        echo ""
+        exit 1
+    fi
     install_files "$INSTALL_DIR"
     enable_services
 
@@ -234,18 +259,25 @@ do_update() {
 
 do_remove() {
     info "Removing mihomoctl..."
-    rm -f "$BINDIR/mihomoctl"
-    rm -f "$SBINDIR/mihomo-update-config"
-    rm -f "$UNITDIR/mihomo.service"
-    rm -f "$UNITDIR/mihomo-update.service"
-    rm -f "$UNITDIR/mihomo-update.timer"
 
+    if systemctl is-active --quiet mihomo-update.timer 2>/dev/null; then
+        systemctl stop mihomo-update.timer
+    fi
+    if systemctl is-enabled --quiet mihomo-update.timer 2>/dev/null; then
+        systemctl disable mihomo-update.timer
+    fi
     if systemctl is-active --quiet mihomo.service 2>/dev/null; then
         systemctl stop mihomo.service
     fi
     if systemctl is-enabled --quiet mihomo.service 2>/dev/null; then
         systemctl disable mihomo.service
     fi
+
+    rm -f "$BINDIR/mihomoctl"
+    rm -f "$SBINDIR/mihomo-update-config"
+    rm -f "$UNITDIR/mihomo.service"
+    rm -f "$UNITDIR/mihomo-update.service"
+    rm -f "$UNITDIR/mihomo-update.timer"
 
     systemctl daemon-reload 2>/dev/null || true
 
