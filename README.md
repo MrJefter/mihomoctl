@@ -2,61 +2,42 @@
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
-CLI tool for managing Mihomo (Clash.Meta) subscriptions on Linux. No Electron, no bloat — just a terminal and your mouse-free workflow.
+One-liner CLI for Mihomo on Linux. Paste your subscription URL, pick a node, done.
 
 [Русская версия](README.ru.md)
 
 ## What is this?
 
-mihomoctl lets you control a Mihomo proxy daemon entirely from the command line. Switch nodes, change routing profiles, toggle between TUN and proxy mode, manage subscriptions — all without touching a GUI.
+mihomoctl installs and manages [Mihomo](https://wiki.metacubex.one/) (Clash-meta) on any Linux system with systemd. One command installs everything — the binary, the service, the update timer. You paste your subscription URL, fzf picks a node, and you're online.
 
-Built for Linux systems with systemd (Ubuntu, Fedora, Arch, Debian, etc.).
+Works with any Mihomo-compatible subscription (Remnawave, RoscomVPN, or your own provider).
 
-## How is this different from vika2603/mihomoctl?
-
-There's another project called [mihomoctl](https://github.com/vika2603/mihomoctl) — a Go-based API client for managing running mihomo instances. It's a great tool, but serves a different purpose.
-
-**This project (MrJefter/mihomoctl):**
-- Focuses on **installation and subscription management**
-- Manages mihomo as a systemd service
-- Handles remnawave/RoscomVPN config setup
-- One-liner install with distro auto-detection
-- Interactive fzf-based node/group pickers
-- Written in Python + Bash
-
-**vika2603/mihomoctl:**
-- Focuses on **runtime API management**
-- Talks to mihomo's external-controller API
-- Proxy switching, connections, DNS, rules, providers
-- Single Go binary, no config files
-- JSON output for scripting
-- Written in Go
-
-They can be used together: this project to set up mihomo, vika2603's for advanced runtime management.
-
-*Note: I didn't know about vika2603/mihomoctl when I created this project. It existed locally on my laptop for 2 months before I pushed it to GitHub.*
+```bash
+curl -fsSL https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh | sudo bash
+```
 
 ## Quick Start
 
-**Install or update:**
+**Install or update (everything in one command):**
 
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh?v=$(date +%s)" | sudo bash
 ```
 
-**Remove:**
+The installer auto-detects your package manager, installs Python + PyYAML, downloads the latest mihomo binary, copies all files, and asks whether to download the RoscomVPN routing template.
+
+**Set your subscription and start:**
+
+```bash
+sudo mihomoctl sub set <your-subscription-url>
+sudo mihomoctl sub update
+sudo mihomoctl enable
+```
+
+**Remove everything:**
 
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh?v=$(date +%s)" | sudo bash -s -- --remove
-```
-
-**Manual install (from clone):**
-
-```bash
-git clone https://github.com/MrJefter/mihomoctl.git
-cd mihomoctl
-sudo make install
-sudo ./install.sh
 ```
 
 ## Table of Contents
@@ -72,17 +53,19 @@ sudo ./install.sh
 - [Updating](#updating)
 - [Uninstall](#uninstall)
 - [Troubleshooting](#troubleshooting)
+- [See Also](#see-also)
 - [License](#license)
 
 ## Features
 
-- **Subscription management** — set URL, auto-update via timer
-- **Interactive selection** — fzf-based node/group/profile pickers (numbered fallback if no fzf)
-- **Routing profiles** — switch which group handles traffic for YouTube, Discord, games, etc.
-- **Mode switching** — toggle between TUN (full system proxy) and proxy-only mode
-- **Service control** — enable/disable mihomo directly from CLI
-- **Distro-universal** — works on any systemd-based Linux (apt/dnf/pacman auto-detected)
-- **Auto-install** — downloads mihomo binary, installs dependencies, no manual steps
+- **One-command install** — auto-detects apt/dnf/pacman, installs everything
+- **Subscription management** — set URL, auto-update via timer, update cycle configurable
+- **Interactive selection** — fzf-based node/group pickers (numbered fallback if no fzf)
+- **DNS editor** — view all DNS fields, override nameservers/fallback, reset to subscription defaults
+- **Node ping test** — test individual nodes or all nodes in a group
+- **Mode switching** — toggle between TUN (full system proxy) and proxy-only
+- **Service control** — enable/disable/restart mihomo from CLI
+- **Persistent settings** — DNS overrides survive subscription updates
 
 ## Requirements
 
@@ -143,15 +126,30 @@ sudo mihomoctl sub update
 
 ## Commands
 
-### Group & Node Selection
+### Node & Group Selection
 
 ```bash
-mihomoctl group pick       # fzf: choose your default proxy group
-mihomoctl group profile    # fzf: choose a routing profile (YouTube, Discord, Games...)
-mihomoctl node pick        # fzf: pick a node in the current default group
+mihomoctl node group       # fzf: pick selector group → pick node within it
+mihomoctl node pick        # fzf: quick pick node in default group
+mihomoctl node test        # ping current node
+mihomoctl node test --all  # ping all nodes in default group
 ```
 
-**Workflow:** `group pick` sets which group you're working with → `node pick` selects the actual server within that group → `group profile` configures routing for specific services.
+### Subscription Management
+
+```bash
+mihomoctl sub set [url]    # set subscription URL (prompts if no arg)
+mihomoctl sub update       # download config, regenerate, restart
+mihomoctl sub cycle        # change auto-update interval (1h–24h or custom)
+```
+
+### DNS Settings
+
+```bash
+mihomoctl dns set          # interactive DNS editor
+```
+
+Shows all DNS fields from your subscription (enhanced-mode, nameservers, fallback, default-nameserver, proxy-server-nameserver, etc.). Override any field, or reset to subscription defaults. DNS overrides persist through subscription updates.
 
 ### Service Control
 
@@ -159,23 +157,16 @@ mihomoctl node pick        # fzf: pick a node in the current default group
 mihomoctl enable           # systemctl enable --now mihomo.service
 mihomoctl disable          # systemctl disable --now mihomo.service
 mihomoctl restart          # systemctl restart mihomo.service
-mihomoctl status           # show mode, group, node, API status, service state
+mihomoctl status           # show service, subscription, routing, network
 mihomoctl logs             # tail -f journalctl -u mihomo.service
-```
-
-### Subscription Management
-
-```bash
-mihomoctl sub set [url]    # set subscription URL (prompts if no arg)
-mihomoctl sub update       # download config from URL, regenerate, restart
 ```
 
 ### Mode Switching
 
 ```bash
 mihomoctl mode             # show current mode
-mihomoctl mode tun         # switch to TUN mode (full system proxy)
-mihomoctl mode proxy       # switch to proxy mode (app-level only)
+mihomoctl mode tun         # TUN mode (full system proxy)
+mihomoctl mode proxy       # proxy mode (app-level only)
 ```
 
 ## Configuration
@@ -320,6 +311,10 @@ Most commands require root. Use `sudo`:
 sudo mihomoctl enable
 sudo mihomoctl sub update
 ```
+
+## See Also
+
+[vika2603/mihomoctl](https://github.com/vika2603/mihomoctl) — Go-based CLI for advanced runtime management: live connection monitoring, DNS debugging, proxy-provider health checks, rule inspection, and JSON scripting. Use both: this project to set up, vika2603's to debug.
 
 ## License
 

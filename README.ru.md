@@ -2,61 +2,42 @@
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
-CLI-утилита для управления подписками Mihomo (Clash.Meta) на Linux. Без Electron, без лишнего — только терминал и ваш безмышечный рабочий процесс.
+Однострочный CLI для Mihomo на Linux. Вставьте ссылку на подписку, выберите ноду — и вы онлайн.
 
 [English version](README.md)
 
 ## Что это?
 
-mihomoctl позволяет управлять демоном Mihomo прокси полностью из командной строки. Переключайте ноды, меняйте профили маршрутизации, переключайтесь между TUN и proxy-режимом, управляйте подписками — всё без GUI.
+mihomoctl устанавливает и управляет [Mihomo](https://wiki.metacubex.one/) (Clash-meta) на любой Linux-системе с systemd. Одна команда ставит всё — бинарник, сервис, таймер обновления. Вставляете ссылку на подписку, fzf выбирает ноду — и вы в сети.
 
-Создано для Linux-систем с systemd (Ubuntu, Fedora, Arch, Debian и т.д.).
+Работает с любой Mihomo-совместимой подпиской (Remnawave, RoscomVPN или ваш провайдер).
 
-## Чем это отличается от vika2603/mihomoctl?
-
-Существует другой проект [mihomoctl](https://github.com/vika2603/mihomoctl) — Go-based API клиент для управления запущенными экземплярами mihomo. Это отличный инструмент, но он предназначен для другой задачи.
-
-**Этот проект (MrJefter/mihomoctl):**
-- Фокусируется на **установке и управлении подписками**
-- Управляет mihomo как системным сервисом
-- Обрабатывает настройку конфигурации remnawave/RoscomVPN
-- Однострочная установка с авто-определением дистрибутива
-- Интерактивные fzf-выборщики нод/групп
-- Написан на Python + Bash
-
-**vika2603/mihomoctl:**
-- Фокусируется на **управлении через API**
-- Разговаривает с API mihomo external-controller
-- Переключение прокси, соединения, DNS, правила, провайдеры
-- Одно Go-бинарный файл, без конфигов
-- JSON вывод для скриптов
-- Написан на Go
-
-Их можно использовать вместе: этот проект для настройки mihomo, vika2603 для продвинутого управления через API.
-
-*Примечание: я не знал о vika2603/mihomoctl, когда создавал этот проект. Он существовал локально на моём ноутбуке 2 месяца, прежде чем я загрузил его на GitHub.*
+```bash
+curl -fsSL https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh | sudo bash
+```
 
 ## Быстрый старт
 
-**Установка или обновление:**
+**Установка или обновление (всё одной командой):**
 
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh?v=$(date +%s)" | sudo bash
 ```
 
-**Удаление:**
+Установщик определяет пакетный менеджер, ставит Python + PyYAML, скачивает последний бинарник mihomo, копирует все файлы и спрашивает, скачать ли шаблон маршрутизации RoscomVPN.
+
+**Установите подписку и запуститесь:**
+
+```bash
+sudo mihomoctl sub set <ваша-ссылка-на-подписку>
+sudo mihomoctl sub update
+sudo mihomoctl enable
+```
+
+**Удалить всё:**
 
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh?v=$(date +%s)" | sudo bash -s -- --remove
-```
-
-**Ручная установка (из клонирования):**
-
-```bash
-git clone https://github.com/MrJefter/mihomoctl.git
-cd mihomoctl
-sudo make install
-sudo ./install.sh
 ```
 
 ## Содержание
@@ -72,17 +53,19 @@ sudo ./install.sh
 - [Обновление](#обновление)
 - [Удаление](#удаление)
 - [Решение проблем](#решение-проблем)
+- [См. также](#см-также)
 - [Лицензия](#лицензия)
 
 ## Возможности
 
-- **Управление подпиской** — установка URL, автообновление по таймеру
-- **Интерактивный выбор** — fzf-пикеры для нод/групп/профилей (нумерованный список без fzf)
-- **Профили маршрутизации** — переключение группы для YouTube, Discord, игр и т.д.
-- **Смена режима** — переключение между TUN (полный системный прокси) и proxy-режимом
-- **Управление сервисом** — включение/выключение mihomo из CLI
-- **Универсальность** — работает на любом Linux с systemd (apt/dnf/pacman определяется автоматически)
-- **Автоустановка** — скачивает бинарник mihomo, ставит зависимости, без ручных шагов
+- **Однокомандная установка** — определяет apt/dnf/pacman, ставит всё
+- **Управление подпиской** — установка URL, автообновление по таймеру, настройка цикла
+- **Интерактивный выбор** — fzf-пикеры для нод/групп (нумерованный список без fzf)
+- **DNS-редактор** — все поля DNS, переопределение nameservers/fallback, сброс к дефолтам подписки
+- **Пинг нод** — проверка отдельных нод или всех нод в группе
+- **Смена режима** — переключение между TUN (полный системный прокси) и proxy
+- **Управление сервисом** — включение/выключение/перезапуск mihomo из CLI
+- **Пersistentность** — DNS-переопределения сохраняются через обновления подписки
 
 ## Требования
 
@@ -143,15 +126,30 @@ sudo mihomoctl sub update
 
 ## Команды
 
-### Выбор группы и ноды
+### Выбор ноды и группы
 
 ```bash
-mihomoctl group pick       # fzf: выбрать основную группу прокси
-mihomoctl group profile    # fzf: выбрать профиль маршрутизации (YouTube, Discord, Игры...)
-mihomoctl node pick        # fzf: выбрать ноду в текущей группе
+mihomoctl node group       # fzf: выбор группы → выбор ноды в ней
+mihomoctl node pick        # fzf: быстрый выбор ноды в основной группе
+mihomoctl node test        # пинг текущей ноды
+mihomoctl node test --all  # пинг всех нод в основной группе
 ```
 
-**Рабочий процесс:** `group pick` задаёт группу → `node pick` выбирает сервер в ней → `group profile` настраивает маршрутизацию для конкретных сервисов.
+### Управление подпиской
+
+```bash
+mihomoctl sub set [url]    # установить URL подписки (промпт если без аргумента)
+mihomoctl sub update       # скачать конфиг, перегенерировать, перезапустить
+mihomoctl sub cycle        # изменить интервал автообновления (1ч–24ч или свой)
+```
+
+### DNS-настройки
+
+```bash
+mihomoctl dns set          # интерактивный DNS-редактор
+```
+
+Показывает все DNS-поля из подписки (enhanced-mode, nameservers, fallback, default-nameserver, proxy-server-nameserver и т.д.). Переопределите любое поле или сбросьте к дефолтам подписки. DNS-переопределения сохраняются через обновления подписки.
 
 ### Управление сервисом
 
@@ -159,23 +157,16 @@ mihomoctl node pick        # fzf: выбрать ноду в текущей гр
 mihomoctl enable           # systemctl enable --now mihomo.service
 mihomoctl disable          # systemctl disable --now mihomo.service
 mihomoctl restart          # systemctl restart mihomo.service
-mihomoctl status           # показать режим, группу, ноду, статус API и сервиса
+mihomoctl status           # сервис, подписка, маршрутизация, сеть
 mihomoctl logs             # tail -f journalctl -u mihomo.service
-```
-
-### Управление подпиской
-
-```bash
-mihomoctl sub set [url]    # установить URL подписки (промпт если без аргумента)
-mihomoctl sub update       # скачать конфиг по URL, перегенерировать, перезапустить
 ```
 
 ### Смена режима
 
 ```bash
 mihomoctl mode             # показать текущий режим
-mihomoctl mode tun         # переключить в TUN (полный системный прокси)
-mihomoctl mode proxy       # переключить в proxy (только для приложений)
+mihomoctl mode tun         # TUN (полный системный прокси)
+mihomoctl mode proxy       # proxy (только для приложений)
 ```
 
 ## Конфигурация
@@ -193,7 +184,7 @@ base.yaml → (generate_config) → config.yaml
 
 Процесс:
 1. `sub update` скачивает подписку в `base.yaml`
-2. `generate_config()` читает `base.yaml`, применяет_RUNTIME-настройки (режим, порты, DNS, TUN), пишет `config.yaml`
+2. `generate_config()` читает `base.yaml`, применяет runtime-настройки (режим, порты, DNS, TUN), пишет `config.yaml`
 3. Mihomo читает `config.yaml` при старте
 
 ### Своя подписка
@@ -320,6 +311,10 @@ sudo pacman -S fzf
 sudo mihomoctl enable
 sudo mihomoctl sub update
 ```
+
+## См. также
+
+[vika2603/mihomoctl](https://github.com/vika2603/mihomoctl) — Go-based CLI для продвинутого управления через API: мониторинг соединений в реальном времени, отладка DNS, проверка здоровья proxy-providers, инспекция правил и JSON-вывод для скриптов. Используйте оба: этот проект для настройки, vika2603 для отладки.
 
 ## Лицензия
 
