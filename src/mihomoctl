@@ -259,8 +259,16 @@ def get_proxies():
     return proxies
 
 
+def group_members(obj):
+    for key in ("all", "proxies"):
+        val = obj.get(key)
+        if isinstance(val, list):
+            return val
+    return []
+
+
 def is_group(obj):
-    return isinstance(obj, dict) and isinstance(obj.get("all"), list)
+    return isinstance(obj, dict) and len(group_members(obj)) > 0
 
 
 def is_selector(obj):
@@ -288,7 +296,7 @@ def candidate_groups(proxies):
     groups = []
     for name, obj in proxies.items():
         if is_selector(obj):
-            nodes = [x for x in obj.get("all", []) if is_node_name(x, proxies)]
+            nodes = [x for x in group_members(obj) if is_node_name(x, proxies)]
             if nodes:
                 groups.append((name, obj, nodes))
     return groups
@@ -298,7 +306,7 @@ def all_groups(proxies):
     groups = []
     for name, obj in proxies.items():
         if is_group(obj):
-            nodes = [x for x in obj.get("all", []) if is_node_name(x, proxies)]
+            nodes = [x for x in group_members(obj) if is_node_name(x, proxies)]
             if nodes:
                 groups.append((name, obj, nodes))
     return groups
@@ -309,7 +317,7 @@ def get_group_nodes(group, proxies):
     if not is_group(obj):
         die(f"not a proxy group: {group}", EXIT_NOT_FOUND)
 
-    nodes = [x for x in obj.get("all", []) if is_node_name(x, proxies)]
+    nodes = [x for x in group_members(obj) if is_node_name(x, proxies)]
     if not nodes:
         die(f"group has no selectable nodes: {group}", EXIT_NOT_FOUND)
     return nodes
@@ -470,7 +478,7 @@ def cmd_node_group(args):
     group = result.split("  ")[0].lstrip("* ").strip()
 
     # Pick node within group
-    nodes = [x for x in proxies[group].get("all", []) if is_node_name(x, proxies)]
+    nodes = [x for x in group_members(proxies[group]) if is_node_name(x, proxies)]
     if not nodes:
         die(f"group has no selectable nodes: {group}", EXIT_NOT_FOUND)
 
