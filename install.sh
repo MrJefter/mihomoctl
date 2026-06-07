@@ -34,10 +34,10 @@ clone_repo() {
     info "Cloning mihomoctl to $INSTALL_DIR..."
     if [[ -d "$INSTALL_DIR/.git" ]]; then
         info "Repository already exists at $INSTALL_DIR, pulling..."
-        git -C "$INSTALL_DIR" pull --ff-only || error "Git pull failed"
+        git -C "$INSTALL_DIR" pull --ff-only >&2 || error "Git pull failed"
     else
         mkdir -p "$(dirname "$INSTALL_DIR")"
-        git clone "$REPO" "$INSTALL_DIR"
+        git clone "$REPO" "$INSTALL_DIR" >&2
     fi
     echo "$INSTALL_DIR"
 }
