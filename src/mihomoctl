@@ -529,7 +529,7 @@ def cmd_status(args):
             check=True,
         )
         print("  status:     \033[32mactive\033[0m")
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, FileNotFoundError):
         print("  status:     \033[31minactive\033[0m")
 
     try:
@@ -573,9 +573,10 @@ def cmd_status(args):
     group = state.get("group")
     node = state.get("node")
     profile = state.get("profile")
-    print(f"  group:      {group or '\033[33mnot set\033[0m'}")
-    print(f"  node:       {node or '\033[33mnot set\033[0m'}")
-    print(f"  profile:    {profile or '\033[33mnot set\033[0m'}")
+    not_set = "\033[33mnot set\033[0m"
+    print(f"  group:      {group or not_set}")
+    print(f"  node:       {node or not_set}")
+    print(f"  profile:    {profile or not_set}")
 
     # Network section
     print()
