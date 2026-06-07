@@ -181,7 +181,7 @@ show_install_complete() {
     echo "     mihomoctl node pick        # pick node in current group"
     echo "     mihomoctl mode tun|proxy   # switch mode"
     echo ""
-    echo "  Update:  curl -fsSL $REPO/raw/master/install.sh | sudo bash -s -- --update"
+    echo "  Update:  curl -fsSL $REPO/raw/master/install.sh | sudo bash"
     echo "  Remove:  curl -fsSL $REPO/raw/master/install.sh | sudo bash -s -- --remove"
     echo ""
 }
@@ -232,31 +232,6 @@ do_install() {
     show_install_complete
 }
 
-do_update() {
-    if [[ ! -d "$INSTALL_DIR/.git" ]]; then
-        error "Repository not found at $INSTALL_DIR. Run install first."
-    fi
-
-    info "Updating mihomoctl..."
-    if ! git -C "$INSTALL_DIR" pull --ff-only; then
-        echo ""
-        warn "Git pull failed. The local repo may have diverged."
-        echo "  To fix, delete and reinstall:"
-        echo "    sudo rm -rf $INSTALL_DIR"
-        echo "    curl -fsSL \"$REPO/raw/master/install.sh?v=\$(date +%s)\" | sudo bash"
-        echo ""
-        exit 1
-    fi
-    install_files "$INSTALL_DIR"
-    enable_services
-
-    info "Update complete!"
-    if systemctl is-active --quiet mihomo.service 2>/dev/null; then
-        systemctl restart mihomo.service
-        info "mihomo service restarted"
-    fi
-}
-
 do_remove() {
     info "Removing mihomoctl..."
 
@@ -298,24 +273,19 @@ do_remove() {
 # --- main ---
 ACTION="${1:-install}"
 case "$ACTION" in
-    --update|-u)  do_update ;;
     --remove|-r)  do_remove ;;
     --help|-h)
         echo "Usage: install.sh [OPTION]"
         echo ""
         echo "Options:"
-        echo "  (no args)   Full install"
-        echo "  --update    Update mihomoctl from git"
+        echo "  (no args)   Install or update mihomoctl"
         echo "  --remove    Remove mihomoctl"
         echo "  --help      Show this help"
         echo ""
-        echo "One-liner install:"
+        echo "Install / update:"
         echo "  curl -fsSL \"$REPO/raw/master/install.sh?v=\$(date +%s)\" | sudo bash"
         echo ""
-        echo "One-liner update:"
-        echo "  curl -fsSL \"$REPO/raw/master/install.sh?v=\$(date +%s)\" | sudo bash -s -- --update"
-        echo ""
-        echo "One-liner remove:"
+        echo "Remove:"
         echo "  curl -fsSL \"$REPO/raw/master/install.sh?v=\$(date +%s)\" | sudo bash -s -- --remove"
         echo ""
         ;;

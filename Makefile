@@ -11,14 +11,13 @@ CONF_DIR     = $(DESTDIR)$(SYSCONFDIR)/mihomo
 UNIT_DIR     = $(DESTDIR)$(UNITDIR)
 STATE_DIR    = $(DESTDIR)/var/lib/mihomoctl
 
-.PHONY: help install uninstall update
+.PHONY: help install uninstall
 
 help:
 	@echo "mihomoctl - Mihomo subscription manager"
 	@echo ""
 	@echo "Targets:"
-	@echo "  install     - Install all files (run with sudo)"
-	@echo "  update      - Pull latest and reinstall (run with sudo)"
+	@echo "  install     - Install or update all files (run with sudo)"
 	@echo "  uninstall   - Remove all installed files (run with sudo)"
 	@echo ""
 	@echo "Variables:"
@@ -31,7 +30,6 @@ help:
 	@echo ""
 	@echo "Usage:"
 	@echo "  sudo make install"
-	@echo "  sudo make update"
 	@echo "  sudo make uninstall"
 
 install:
@@ -48,10 +46,6 @@ install:
 	@systemctl daemon-reload 2>/dev/null || true
 	@echo ""
 	@echo "Done. Run 'sudo ./install.sh' for full setup (deps + mihomo binary)."
-
-update:
-	@git pull
-	@$(MAKE) install
 
 uninstall:
 	@echo "Removing mihomoctl..."

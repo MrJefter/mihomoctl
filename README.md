@@ -14,19 +14,13 @@ Built for Linux systems with systemd (Ubuntu, Fedora, Arch, Debian, etc.).
 
 ## Quick Start
 
-**One-liner install:**
+**Install or update:**
 
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh?v=$(date +%s)" | sudo bash
 ```
 
-**One-liner update:**
-
-```bash
-curl -fsSL "https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh?v=$(date +%s)" | sudo bash -s -- --update
-```
-
-**One-liner remove:**
+**Remove:**
 
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh?v=$(date +%s)" | sudo bash -s -- --remove
@@ -224,14 +218,15 @@ sudo systemctl enable --now mihomo-update.timer  # optional, auto-updates subscr
 ## Updating
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh | sudo bash -s -- --update
+curl -fsSL "https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh?v=$(date +%s)" | sudo bash
 ```
 
 Or manually:
 
 ```bash
 cd ~/.local/share/mihomoctl
-sudo make update
+git pull
+sudo make install
 sudo mihomoctl restart
 ```
 

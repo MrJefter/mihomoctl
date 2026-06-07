@@ -14,19 +14,13 @@ mihomoctl позволяет управлять демоном Mihomo прокс
 
 ## Быстрый старт
 
-**Однострочная установка:**
+**Установка или обновление:**
 
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh?v=$(date +%s)" | sudo bash
 ```
 
-**Однострочное обновление:**
-
-```bash
-curl -fsSL "https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh?v=$(date +%s)" | sudo bash -s -- --update
-```
-
-**Однострочное удаление:**
+**Удаление:**
 
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh?v=$(date +%s)" | sudo bash -s -- --remove
@@ -224,14 +218,15 @@ sudo systemctl enable --now mihomo-update.timer  # опционально, ав�
 ## Обновление
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh | sudo bash -s -- --update
+curl -fsSL "https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh?v=$(date +%s)" | sudo bash
 ```
 
 Или вручную:
 
 ```bash
 cd ~/.local/share/mihomoctl
-sudo make update
+git pull
+sudo make install
 sudo mihomoctl restart
 ```
 
