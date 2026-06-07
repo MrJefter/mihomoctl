@@ -425,39 +425,90 @@ def cmd_disable(args):
 def cmd_status(args):
     state = read_state()
 
-    print(f"mode:       {state.get('mode', 'tun')}")
-    print(f"group:      {state.get('group')}")
-    print(f"node:       {state.get('node')}")
-    print(f"profile:    {state.get('profile')}")
-    print()
-
+    # Service section
+    print("\033[1m── Service ──────────────\033[0m")
     try:
         subprocess.run(
             ["systemctl", "is-active", "--quiet", "mihomo.service"],
             check=True,
         )
-        print("service:    active")
+        print("  status:     \033[32mactive\033[0m")
     except subprocess.CalledProcessError:
-        print("service:    inactive")
+        print("  status:     \033[31minactive\033[0m")
 
+    try:
+        version_data = http_json("GET", "/version")
+        version = version_data.get("version", "unknown") if isinstance(version_data, dict) else "unknown"
+        print(f"  version:    {version}")
+    except Exception:
+        print("  version:    \033[31munknown (API down)\033[0m")
+
+    print(f"  mode:       {state.get('mode', 'tun')}")
+
+    # Subscription section
+    print()
+    print("\033[1m── Subscription ─────────\033[0m")
+    if SUB_URL.exists():
+        sub_url = SUB_URL.read_text().strip()
+        if sub_url:
+            # Mask URL if too long
+            display_url = sub_url if len(sub_url) <= 50 else sub_url[:47] + "..."
+            print(f"  url:        {display_url}")
+
+            # Check subscription age
+            age_hours = (time.time() - SUB_URL.stat().st_mtime) / 3600
+            if age_hours > 24:
+                age_str = f"{int(age_hours)}h ago"
+                print(f"  last update: \033[33m{age_str} (run: sudo mihomoctl sub update)\033[0m")
+            else:
+                if age_hours < 1:
+                    age_str = f"{int(age_hours * 60)}m ago"
+                else:
+                    age_str = f"{int(age_hours)}h ago"
+                print(f"  last update: {age_str}")
+        else:
+            print("  url:        \033[33mnot set\033[0m")
+    else:
+        print("  url:        \033[33mnot set\033[0m")
+
+    # Routing section
+    print()
+    print("\033[1m── Routing ──────────────\033[0m")
+    group = state.get("group")
+    node = state.get("node")
+    profile = state.get("profile")
+    print(f"  group:      {group or '\033[33mnot set\033[0m'}")
+    print(f"  node:       {node or '\033[33mnot set\033[0m'}")
+    print(f"  profile:    {profile or '\033[33mnot set\033[0m'}")
+
+    # Network section
+    print()
+    print("\033[1m── Network ──────────────\033[0m")
     try:
         cfg = http_json("GET", "/configs")
-        print("api:        ok")
-        print(f"mixed-port: {cfg.get('mixed-port')}")
-        print(f"mode:       {cfg.get('mode')}")
+        print(f"  api:        \033[32mok\033[0m (127.0.0.1:9090)")
+        print(f"  mixed-port: {cfg.get('mixed-port')}")
         tun = cfg.get("tun") if isinstance(cfg.get("tun"), dict) else {}
-        print(f"tun.enable: {tun.get('enable')}")
+        tun_enabled = tun.get("enable", False)
+        if tun_enabled:
+            print(f"  tun:        \033[32menabled\033[0m")
+        else:
+            print(f"  tun:        disabled")
     except Exception as e:
-        print(f"api:        down ({e})")
+        print(f"  api:        \033[31mdown\033[0m ({e})")
 
+    # Active proxy
     try:
         proxies = get_proxies()
-        group = state.get("group")
         if group and group in proxies:
             now = proxies[group].get("now")
-            print(f"active:     {group} -> {now}")
-    except Exception as e:
-        print(f"proxies:    unavailable ({e})")
+            if now:
+                print()
+                print(f"  active:     {group} -> {now}")
+    except Exception:
+        pass
+
+    print()
 
 
 def cmd_mode(args):
