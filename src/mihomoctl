@@ -409,7 +409,7 @@ def cmd_node_group(args):
     for name, obj, nodes in groups:
         prefix = "* " if name == state.get("group") else "  "
         t = str(obj.get("type", "")).lower()
-        items.append(f"{prefix}{name}  ({t}, {len(nodes)} nodes)")
+        items.append(f"{prefix}{name}  ({t})")
 
     result = fzf_select(items, "group> ")
     if not result:
@@ -736,22 +736,36 @@ def cmd_dns_set(args):
     need_root("configuring DNS settings")
 
     state = read_state()
-
-    # Read current effective DNS from generated config
-    if CFG.exists():
-        cfg = load_yaml(CFG)
-    else:
-        cfg = {}
-
-    dns = cfg.get("dns", {})
     dns_overrides = state.get("dns", {})
 
-    def show_dns():
-        current_mode = dns_overrides.get("enhanced-mode", dns.get("enhanced-mode", "redir-host"))
-        current_ns = dns_overrides.get("nameservers", dns.get("nameserver", []))
-        current_fb = dns_overrides.get("fallback", dns.get("fallback", []))
+    def load_base_dns():
+        base = load_yaml(BASE_CFG) if BASE_CFG.exists() else {}
+        return base.get("dns", {})
 
-        print("\033[1m── DNS Settings ──────────\033[0m")
+    base_dns = load_base_dns()
+
+    def show_dns():
+        current_mode = dns_overrides.get("enhanced-mode", base_dns.get("enhanced-mode", "redir-host"))
+        current_ns = dns_overrides.get("nameservers", base_dns.get("nameserver", []))
+        current_fb = dns_overrides.get("fallback", base_dns.get("fallback", []))
+
+        def fmt(val):
+            if isinstance(val, list):
+                if not val:
+                    return "[]"
+                return str(val)
+            return str(val) if val is not None else "?"
+
+        print("\033[1m── DNS Settings (base.yaml) ──\033[0m")
+        print(f"  enhanced-mode:           {base_dns.get('enhanced-mode', '?')}")
+        print(f"  ipv6:                    {fmt(base_dns.get('ipv6'))}")
+        print(f"  fake-ip-range:           {fmt(base_dns.get('fake-ip-range'))}")
+        print(f"  fake-ip-filter:          {fmt(base_dns.get('fake-ip-filter'))}")
+        print(f"  default-nameserver:      {fmt(base_dns.get('default-nameserver'))}")
+        print(f"  proxy-server-nameserver: {fmt(base_dns.get('proxy-server-nameserver'))}")
+        print(f"  direct-nameserver:       {fmt(base_dns.get('direct-nameserver'))}")
+        print()
+        print("\033[1m── Effective (with overrides) ──\033[0m")
         print(f"  enhanced-mode:  {current_mode}")
         print("  nameservers:")
         if current_ns:
@@ -773,7 +787,6 @@ def cmd_dns_set(args):
         print("  4) Reset to base.yaml")
         print("  5) Apply & save")
         print("  6) Cancel")
-        return current_mode, current_ns, current_fb
 
     def edit_list(label, items):
         while True:
@@ -845,7 +858,7 @@ def cmd_dns_set(args):
                 print("  \033[31minvalid choice\033[0m")
 
     while True:
-        current_mode, current_ns, current_fb = show_dns()
+        show_dns()
 
         try:
             choice = input("\n  Select [1-6]: ").strip()
@@ -867,11 +880,13 @@ def cmd_dns_set(args):
                 print(f"  \033[32menhanced-mode: {dns_overrides['enhanced-mode']}\033[0m")
 
         elif choice == "2":
+            current_ns = dns_overrides.get("nameservers", base_dns.get("nameserver", []))
             ns = list(current_ns)
             edit_list("Nameservers", ns)
             dns_overrides["nameservers"] = ns
 
         elif choice == "3":
+            current_fb = dns_overrides.get("fallback", base_dns.get("fallback", []))
             fb = list(current_fb)
             edit_list("Fallback servers", fb)
             dns_overrides["fallback"] = fb
@@ -879,6 +894,7 @@ def cmd_dns_set(args):
         elif choice == "4":
             state.pop("dns", None)
             dns_overrides = {}
+            base_dns = load_base_dns()
             print("  \033[32mDNS reset to base.yaml defaults\033[0m")
 
         elif choice == "5":
