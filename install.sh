@@ -186,38 +186,73 @@ show_install_complete() {
     echo ""
 }
 
+download_template() {
+    local base="$1"
+    local url="https://raw.githubusercontent.com/hydraponique/roscomvpn-routing/main/MIHOMO/template_remnawave.yaml"
+    if command -v wget &>/dev/null; then
+        wget -q -O "$base" "$url"
+    elif command -v curl &>/dev/null; then
+        curl -sL -o "$base" "$url"
+    else
+        warn "Neither wget nor curl found. Download manually: $url"
+        return 1
+    fi
+    chmod 600 "$base"
+    info "Saved: $base"
+}
+
 download_roscomvpn() {
     local base="$SYSCONFDIR/mihomo/base.yaml"
-    if [[ -f "$base" ]]; then
-        warn "$base already exists, skipping"
-        return
-    fi
 
     if [[ ! -t 0 ]]; then
         info "Running non-interactively, skipping RoscomVPN template."
-        info "Run 'sudo mihomoctl sub set' to configure manually."
         return
     fi
 
-    echo ""
-    read -rp "Download RoscomVPN routing template? [Y/n] " answer
-    case "${answer,,}" in
-        n|no) info "Skipped. Run 'sudo mihomoctl sub set' to configure manually." ;;
-        *)
-            info "Downloading RoscomVPN template..."
-            local url="https://raw.githubusercontent.com/hydraponique/roscomvpn-routing/main/MIHOMO/template_remnawave.yaml"
-            if command -v wget &>/dev/null; then
-                wget -q -O "$base" "$url"
-            elif command -v curl &>/dev/null; then
-                curl -sL -o "$base" "$url"
-            else
-                warn "Neither wget nor curl found. Download manually: $url"
-                return
-            fi
-            chmod 600 "$base"
-            info "Saved: $base"
-            ;;
-    esac
+    if [[ -f "$base" ]]; then
+        echo ""
+        warn "$base already exists."
+        read -rp "Overwrite with RoscomVPN template? [y/N] " answer
+        case "${answer,,}" in
+            y|yes)
+                info "Downloading RoscomVPN template..."
+                download_template "$base"
+                ;;
+            *)
+                info "Keeping existing $base"
+                ;;
+        esac
+    else
+        echo ""
+        read -rp "Download RoscomVPN routing template? [Y/n] " answer
+        case "${answer,,}" in
+            n|no) info "Skipped. Run 'sudo mihomoctl sub set' to configure manually." ;;
+            *)    download_template "$base" ;;
+        esac
+    fi
+
+    # Ask about DNS reset if state exists
+    if [[ -f /var/lib/mihomoctl/state.json ]]; then
+        echo ""
+        warn "Existing mihomoctl state detected."
+        read -rp "Reset DNS settings to defaults? [Y/n] " answer
+        case "${answer,,}" in
+            n|no) info "Keeping current DNS settings" ;;
+            *)
+                if command -v python3 &>/dev/null; then
+                    python3 -c "
+import json
+s = json.load(open('/var/lib/mihomoctl/state.json'))
+s.pop('dns', None)
+json.dump(s, open('/var/lib/mihomoctl/state.json', 'w'), indent=2)
+"
+                    info "DNS settings reset to defaults"
+                else
+                    warn "python3 not found, cannot reset DNS settings"
+                fi
+                ;;
+        esac
+    fi
 }
 
 do_install() {
