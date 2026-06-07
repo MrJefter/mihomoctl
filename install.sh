@@ -16,9 +16,9 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-info()  { echo -e "${GREEN}[+]${NC} $*"; }
-warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
-error() { echo -e "${RED}[-]${NC} $*"; exit 1; }
+info()  { echo -e "${GREEN}[+]${NC} $*" >&2; }
+warn()  { echo -e "${YELLOW}[!]${NC} $*" >&2; }
+error() { echo -e "${RED}[-]${NC} $*" >&2; exit 1; }
 
 if [[ $EUID -ne 0 ]]; then
     error "Run with sudo: sudo bash install.sh"
