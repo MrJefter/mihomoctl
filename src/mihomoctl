@@ -302,16 +302,6 @@ def candidate_groups(proxies):
     return groups
 
 
-def all_groups(proxies):
-    groups = []
-    for name, obj in proxies.items():
-        if is_group(obj):
-            nodes = [x for x in group_members(obj) if is_node_name(x, proxies)]
-            if nodes:
-                groups.append((name, obj, nodes))
-    return groups
-
-
 def get_group_nodes(group, proxies):
     obj = proxies.get(group)
     if not is_group(obj):
@@ -461,7 +451,7 @@ def cmd_node_group(args):
     proxies = get_proxies()
     state = read_state()
 
-    groups = all_groups(proxies)
+    groups = candidate_groups(proxies)
     if not groups:
         die("no proxy groups found", EXIT_NOT_FOUND)
 
@@ -478,7 +468,7 @@ def cmd_node_group(args):
     group = result.split("  ")[0].lstrip("* ").strip()
 
     # Pick node within group
-    nodes = [x for x in group_members(proxies[group]) if is_node_name(x, proxies)]
+    nodes = group_members(proxies[group])
     if not nodes:
         die(f"group has no selectable nodes: {group}", EXIT_NOT_FOUND)
 
