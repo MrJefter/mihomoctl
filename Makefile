@@ -14,7 +14,7 @@ BASH_COMPLETION_DIR = $(DESTDIR)/etc/bash_completion.d
 ZSH_COMPLETION_DIR  = $(DESTDIR)/usr/share/zsh/site-functions
 FISH_COMPLETION_DIR = $(DESTDIR)/usr/share/fish/vendor_completions.d
 
-.PHONY: help install uninstall test
+.PHONY: help install uninstall
 
 help:
 	@echo "mihomoctl - Mihomo subscription manager"
@@ -22,7 +22,6 @@ help:
 	@echo "Targets:"
 	@echo "  install     - Install or update all files (run with sudo)"
 	@echo "  uninstall   - Remove all installed files (run with sudo)"
-	@echo "  test        - Run unit tests"
 	@echo ""
 	@echo "Variables:"
 	@echo "  PREFIX      = $(PREFIX)"
@@ -35,7 +34,6 @@ help:
 	@echo "Usage:"
 	@echo "  sudo make install"
 	@echo "  sudo make uninstall"
-	@echo "  make test"
 
 install:
 	@echo "Installing mihomoctl..."
@@ -81,7 +79,3 @@ uninstall:
 	@echo ""
 	@echo "To remove config and state:"
 	@echo "  sudo rm -rf $(CONF_DIR) /var/lib/mihomoctl"
-
-test:
-	@echo "Running unit tests..."
-	@python3 -m pytest tests/ -v --tb=short 2>/dev/null || python3 -m unittest discover -s tests -v
