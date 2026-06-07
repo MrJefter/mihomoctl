@@ -144,23 +144,41 @@ def generate_config():
 
     cfg["ipv6"] = False
 
+    # Apply DNS overrides from state
+    dns_overrides = state.get("dns", {})
+
     dns = cfg.get("dns")
     if not isinstance(dns, dict):
         dns = {}
 
     dns["enable"] = True
     dns["ipv6"] = False
-    dns["enhanced-mode"] = "redir-host"
+
+    # Apply enhanced-mode override
+    enhanced_mode = dns_overrides.get("enhanced-mode", "redir-host")
+    dns["enhanced-mode"] = enhanced_mode
+
     dns.pop("fake-ip-range", None)
     dns.setdefault("default-nameserver", ["1.1.1.1", "8.8.8.8"])
-    dns.setdefault("nameserver", [
-        "https://1.1.1.1/dns-query",
-        "https://8.8.8.8/dns-query"
-    ])
-    dns.setdefault("fallback", [
-        "https://1.0.0.1/dns-query",
-        "https://8.8.4.4/dns-query"
-    ])
+
+    # Apply nameserver overrides
+    if "nameservers" in dns_overrides:
+        dns["nameserver"] = dns_overrides["nameservers"]
+    else:
+        dns.setdefault("nameserver", [
+            "https://1.1.1.1/dns-query",
+            "https://8.8.8.8/dns-query"
+        ])
+
+    # Apply fallback overrides
+    if "fallback" in dns_overrides:
+        dns["fallback"] = dns_overrides["fallback"]
+    else:
+        dns.setdefault("fallback", [
+            "https://1.0.0.1/dns-query",
+            "https://8.8.4.4/dns-query"
+        ])
+
     dns.setdefault("fake-ip-filter", [
         "*.lan",
         "*.local",
@@ -779,6 +797,107 @@ def cmd_logs(args):
         return
 
 
+def cmd_dns_set(args):
+    need_root("configuring DNS settings")
+
+    state = read_state()
+    dns_overrides = state.get("dns", {})
+
+    # Show current settings
+    print("\033[1m── Current DNS Settings ──\033[0m")
+    current_mode = dns_overrides.get("enhanced-mode", "redir-host")
+    print(f"  enhanced-mode: {current_mode}")
+
+    current_ns = dns_overrides.get("nameservers", [
+        "https://1.1.1.1/dns-query",
+        "https://8.8.8.8/dns-query"
+    ])
+    print("  nameservers:")
+    for i, ns in enumerate(current_ns, 1):
+        print(f"    {i}) {ns}")
+
+    current_fb = dns_overrides.get("fallback", [
+        "https://1.0.0.1/dns-query",
+        "https://8.8.4.4/dns-query"
+    ])
+    print("  fallback:")
+    for i, fb in enumerate(current_fb, 1):
+        print(f"    {i}) {fb}")
+
+    print()
+    print("\033[1m── Configure DNS ──\033[0m")
+    print("  1) Enhanced mode")
+    print("  2) Nameservers")
+    print("  3) Fallback servers")
+    print("  4) Apply & save")
+    print("  5) Cancel")
+
+    while True:
+        if not sys.stdin.isatty():
+            die("dns set requires interactive terminal", EXIT_INVALID_INPUT)
+
+        choice = input("\n  Select [1-5]: ").strip()
+
+        if choice == "1":
+            # Enhanced mode
+            items = [
+                "  redir-host (default, recommended)",
+                "  fake-ip (faster, some apps may not work)"
+            ]
+            result = fzf_select(items, "enhanced-mode> ")
+            if result:
+                if "redir-host" in result:
+                    dns_overrides["enhanced-mode"] = "redir-host"
+                else:
+                    dns_overrides["enhanced-mode"] = "fake-ip"
+                print(f"  set enhanced-mode to: {dns_overrides['enhanced-mode']}")
+
+        elif choice == "2":
+            # Nameservers
+            print("\n  Current nameservers:")
+            for i, ns in enumerate(current_ns, 1):
+                print(f"    {i}) {ns}")
+            print("\n  Enter new nameserver URL (or press Enter to keep current):")
+            new_ns = input("  > ").strip()
+            if new_ns:
+                if not new_ns.startswith(("http://", "https://")):
+                    print("  \033[31mURL must start with http:// or https://\033[0m")
+                else:
+                    current_ns.append(new_ns)
+                    dns_overrides["nameservers"] = current_ns
+                    print(f"  added: {new_ns}")
+
+        elif choice == "3":
+            # Fallback servers
+            print("\n  Current fallback servers:")
+            for i, fb in enumerate(current_fb, 1):
+                print(f"    {i}) {fb}")
+            print("\n  Enter new fallback URL (or press Enter to keep current):")
+            new_fb = input("  > ").strip()
+            if new_fb:
+                if not new_fb.startswith(("http://", "https://")):
+                    print("  \033[31mURL must start with http:// or https://\033[0m")
+                else:
+                    current_fb.append(new_fb)
+                    dns_overrides["fallback"] = current_fb
+                    print(f"  added: {new_fb}")
+
+        elif choice == "4":
+            # Apply & save
+            state["dns"] = dns_overrides
+            write_state(state)
+            print("\n  \033[32mDNS settings saved.\033[0m Run: sudo mihomoctl restart")
+            return
+
+        elif choice == "5":
+            # Cancel
+            print("  cancelled")
+            return
+
+        else:
+            print("  \033[31minvalid choice\033[0m")
+
+
 def main():
     p = argparse.ArgumentParser(prog="mihomoctl")
 
@@ -821,6 +940,11 @@ def main():
 
     sub.add_parser("restart").set_defaults(fn=cmd_restart)
     sub.add_parser("logs").set_defaults(fn=cmd_logs)
+
+    d = sub.add_parser("dns")
+    dsub = d.add_subparsers(dest="dns_cmd", required=True)
+    ds = dsub.add_parser("set")
+    ds.set_defaults(fn=cmd_dns_set)
 
     args = p.parse_args()
     args.fn(args)
