@@ -13,13 +13,18 @@ mihomoctl installs and manages [Mihomo](https://wiki.metacubex.one/) (Clash-meta
 Works with any Mihomo-compatible subscription (Remnawave, RoscomVPN, or your own provider).
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Jefter5549/mihomoctl/master/install.sh | sudo bash
+curl -fsSL https://cdn.jsdelivr.net/gh/Jefter5549/mihomoctl@master/install.sh | sudo bash
 ```
 
 ## Quick Start
 
 **Install or update (everything in one command):**
 
+```bash
+curl -fsSL https://cdn.jsdelivr.net/gh/Jefter5549/mihomoctl@master/install.sh | sudo bash
+```
+
+*(Alternative raw GitHub link)*:
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/Jefter5549/mihomoctl/master/install.sh?v=$(date +%s)" | sudo bash
 ```
@@ -37,7 +42,7 @@ sudo mihomoctl enable
 **Remove everything:**
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/Jefter5549/mihomoctl/master/install.sh?v=$(date +%s)" | sudo bash -s -- --remove
+curl -fsSL https://cdn.jsdelivr.net/gh/Jefter5549/mihomoctl@master/install.sh | sudo bash -s -- --remove
 ```
 
 ## Table of Contents

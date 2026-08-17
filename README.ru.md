@@ -13,13 +13,18 @@ mihomoctl автоматизирует установку и настройку 
 Подходит для любых подписок формата Mihomo / Clash (Remnawave, RoscomVPN или собственные конфигурации).
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Jefter5549/mihomoctl/master/install.sh | sudo bash
+curl -fsSL https://cdn.jsdelivr.net/gh/Jefter5549/mihomoctl@master/install.sh | sudo bash
 ```
 
 ## Быстрый старт
 
 **Установка или обновление в одну команду:**
 
+```bash
+curl -fsSL https://cdn.jsdelivr.net/gh/Jefter5549/mihomoctl@master/install.sh | sudo bash
+```
+
+*(Альтернативная ссылка через raw GitHub)*:
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/Jefter5549/mihomoctl/master/install.sh?v=$(date +%s)" | sudo bash
 ```
@@ -37,7 +42,7 @@ sudo mihomoctl enable
 **Полное удаление:**
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/Jefter5549/mihomoctl/master/install.sh?v=$(date +%s)" | sudo bash -s -- --remove
+curl -fsSL https://cdn.jsdelivr.net/gh/Jefter5549/mihomoctl@master/install.sh | sudo bash -s -- --remove
 ```
 
 ## Содержание

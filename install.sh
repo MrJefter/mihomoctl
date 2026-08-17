@@ -281,15 +281,33 @@ show_install_complete() {
 
 download_template() {
     local base="$1"
-    local url="https://raw.githubusercontent.com/hydraponique/roscomvpn-routing/main/MIHOMO/template_remnawave.yaml"
-    if command -v curl &>/dev/null; then
-        curl -sL -o "$base" "$url"
-    elif command -v wget &>/dev/null; then
-        wget -q -O "$base" "$url"
-    else
-        warn "Neither wget nor curl found. Download manually: $url"
+    local urls=(
+        "https://cdn.jsdelivr.net/gh/hydraponique/roscomvpn-routing@main/MIHOMO/template_remnawave.yaml"
+        "https://raw.githubusercontent.com/hydraponique/roscomvpn-routing/main/MIHOMO/template_remnawave.yaml"
+        "https://fastly.jsdelivr.net/gh/hydraponique/roscomvpn-routing@main/MIHOMO/template_remnawave.yaml"
+    )
+
+    local downloaded=0
+    for url in "${urls[@]}"; do
+        info "Trying to download template from $url..."
+        if command -v curl &>/dev/null; then
+            if curl -fsSL --max-time 15 -o "$base" "$url" 2>/dev/null && [[ -s "$base" ]]; then
+                downloaded=1
+                break
+            fi
+        elif command -v wget &>/dev/null; then
+            if wget -q -T 15 -O "$base" "$url" 2>/dev/null && [[ -s "$base" ]]; then
+                downloaded=1
+                break
+            fi
+        fi
+    done
+
+    if [[ $downloaded -eq 0 ]]; then
+        warn "Could not download template automatically. Download manually to $base"
         return 1
     fi
+
     chmod 600 "$base"
     info "Saved: $base"
 }
