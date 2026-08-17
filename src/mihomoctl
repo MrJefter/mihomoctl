@@ -1,29 +1,48 @@
 #!/usr/bin/env python3
 import argparse
+import copy
+import fcntl
 import getpass
+import ipaddress
 import json
 import os
+import re
+import secrets
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from contextlib import contextmanager
 
 import yaml
 
-ETC = Path("/etc/mihomo")
-VAR = Path("/var/lib/mihomoctl")
+ETC = Path(os.environ.get("MIHOMOCTL_ETC", "/etc/mihomo"))
+VAR = Path(os.environ.get("MIHOMOCTL_VAR", "/var/lib/mihomoctl"))
 
 SUB_URL = ETC / "sub.url"
 BASE_CFG = ETC / "base.yaml"
 CFG = ETC / "config.yaml"
-STATE = VAR / "state.json"
+CAPTURE_MODE = ETC / "capture-mode"
+EXTRA_RULES = ETC / "extra-rules.yaml"
 
-CONTROLLER = "http://127.0.0.1:9090"
-MIXED_PORT = 7890
+CONTROLLER = os.environ.get("MIHOMOCTL_CONTROLLER", "http://127.0.0.1:9090").rstrip("/")
+DEFAULT_MIHOMO_BIN = Path(__file__).resolve().with_name("mihomo")
+MIHOMO_BIN = os.environ.get("MIHOMOCTL_MIHOMO_BIN") or (
+    str(DEFAULT_MIHOMO_BIN)
+    if DEFAULT_MIHOMO_BIN.exists()
+    else shutil.which("mihomo") or "/usr/local/bin/mihomo"
+)
+SYSTEMCTL = os.environ.get("MIHOMOCTL_SYSTEMCTL", "systemctl")
+TIMER_UNIT = Path(os.environ.get(
+    "MIHOMOCTL_TIMER_UNIT", "/etc/systemd/system/mihomo-update.timer"
+))
+MAX_SUBSCRIPTION_BYTES = 128 * 1024 * 1024
 
 # Exit codes
 EXIT_OK = 0
@@ -34,13 +53,15 @@ EXIT_AUTH_FAILED = 4
 EXIT_INVALID_INPUT = 5
 EXIT_DEPENDENCY = 6
 
-GROUP_TYPES = {
-    "selector", "select",
+POLICY_GROUP_TYPES = {
+    "selector", "urltest", "fallback", "loadbalance", "relay",
 }
-
-NON_NODE_NAMES = {
+SELECTOR_GROUP_TYPES = {"selector", "select"}
+PINNABLE_GROUP_TYPES = {"urltest", "fallback"}
+NON_TESTABLE_PROXIES = {
     "DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBLE",
 }
+_OPERATION_LOCK_FD = None
 
 
 def die(msg, code=EXIT_GENERAL):
@@ -53,124 +74,473 @@ def need_root(action):
         die(f"{action} needs root. Run: sudo mihomoctl ...", EXIT_DEPENDENCY)
 
 
-def read_state():
-    if not STATE.exists():
-        return {"mode": "tun", "group": None, "node": None}
-    try:
-        return json.loads(STATE.read_text())
-    except Exception:
-        return {"mode": "tun", "group": None, "node": None}
+@contextmanager
+def operation_lock():
+    """Serialize state/config mutations across CLI and timer processes."""
+    global _OPERATION_LOCK_FD
+    if _OPERATION_LOCK_FD is not None:
+        yield
+        return
 
-
-def write_state(state):
     VAR.mkdir(parents=True, exist_ok=True)
-    STATE.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n")
+    # Lock the directory inode itself. Unlike a user-writable lock path, it
+    # cannot be swapped for a symlink to a privileged file between root calls.
+    fd = os.open(
+        VAR,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+    )
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        _OPERATION_LOCK_FD = fd
+        yield
+    finally:
+        _OPERATION_LOCK_FD = None
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def _stage_text(path, content, mode=0o600, preserve_owner=False):
+    """Write and fsync a temporary sibling of path, returning its Path."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temp_path, mode)
+
+        if preserve_owner and os.geteuid() == 0:
+            try:
+                owner = path.stat()
+            except FileNotFoundError:
+                owner = path.parent.stat()
+            os.chown(temp_path, owner.st_uid, owner.st_gid)
+        return temp_path
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
+def atomic_write_text(path, content, mode=0o600, preserve_owner=False):
+    """Atomically replace path with content and explicit permissions."""
+    path = Path(path)
+    temp_path = _stage_text(path, content, mode, preserve_owner)
+    try:
+        os.replace(temp_path, path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def read_regular_text(path, max_bytes):
+    """Read a bounded regular file without following user-controlled symlinks."""
+    fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise OSError(f"not a regular file: {path}")
+        if metadata.st_size > max_bytes:
+            raise OSError(f"file is too large: {path}")
+        with os.fdopen(fd, "r", encoding="utf-8") as stream:
+            fd = -1
+            content = stream.read(max_bytes + 1)
+            if len(content) > max_bytes:
+                raise OSError(f"file grew too large while reading: {path}")
+            return content
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def get_controller_secret(create=False):
+    """Read or create the local API credential shared by Mihomo and this CLI."""
+    secret_path = VAR / "controller.secret"
+    try:
+        secret = read_regular_text(secret_path, 4096).strip()
+        if secret:
+            return secret
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        if not create:
+            return ""
+        die(f"cannot read controller secret: {error}", EXIT_GENERAL)
+
+    if not create:
+        return ""
+
+    with operation_lock():
+        try:
+            secret = read_regular_text(secret_path, 4096).strip()
+        except FileNotFoundError:
+            secret = ""
+        except OSError as error:
+            die(f"cannot read controller secret: {error}", EXIT_GENERAL)
+        if not secret:
+            secret = secrets.token_urlsafe(32)
+            atomic_write_text(
+                secret_path,
+                secret + "\n",
+                mode=0o640,
+                preserve_owner=True,
+            )
+        return secret
 
 
 def load_yaml(path):
-    if not path.exists():
+    try:
+        content = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
         die(f"{path} does not exist", EXIT_NOT_FOUND)
-    data = yaml.safe_load(path.read_text()) or {}
+    except OSError as error:
+        die(f"cannot read {path}: {error}", EXIT_GENERAL)
+    try:
+        data = yaml.safe_load(content) or {}
+    except yaml.YAMLError as error:
+        die(f"invalid YAML in {path}: {error}", EXIT_INVALID_INPUT)
     if not isinstance(data, dict):
         die(f"{path} is not a YAML object", EXIT_INVALID_INPUT)
     return data
 
 
-def save_yaml(path, data):
-    path.write_text(
-        yaml.safe_dump(
-            data,
-            allow_unicode=True,
-            sort_keys=False,
-            default_flow_style=False,
-        )
+def dump_yaml(data):
+    return yaml.safe_dump(
+        data,
+        allow_unicode=True,
+        sort_keys=False,
+        default_flow_style=False,
     )
 
 
-def generate_config():
+def save_yaml(path, data, mode=0o600):
+    atomic_write_text(path, dump_yaml(data), mode=mode)
+
+
+def controller_address():
+    parsed = urllib.parse.urlsplit(CONTROLLER)
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        die(
+            "MIHOMOCTL_CONTROLLER must be an unauthenticated loopback HTTP URL",
+            EXIT_INVALID_INPUT,
+        )
+    return parsed.netloc
+
+
+def read_capture_mode():
+    """Return the explicit host capture override, or None to inherit."""
+    try:
+        value = read_regular_text(CAPTURE_MODE, 64).strip()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        die(f"cannot read {CAPTURE_MODE}: {error}", EXIT_GENERAL)
+    if value not in {"tun", "proxy"}:
+        die(
+            f"invalid {CAPTURE_MODE}: expected 'tun' or 'proxy'",
+            EXIT_INVALID_INPUT,
+        )
+    return value
+
+
+def _ip_network(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        return ipaddress.ip_network(value.strip(), strict=False)
+    except ValueError:
+        return None
+
+
+def _subtract_networks(network, excluded_pools):
+    """Return CIDRs for ``network`` minus same-family fake-IP pools."""
+    fragments = [network]
+    for pool in excluded_pools:
+        if pool.version != network.version:
+            continue
+        remainder = []
+        for fragment in fragments:
+            if not fragment.overlaps(pool):
+                remainder.append(fragment)
+            elif fragment.subnet_of(pool):
+                continue
+            elif pool.subnet_of(fragment):
+                remainder.extend(fragment.address_exclude(pool))
+        fragments = remainder
+    return fragments
+
+
+def normalize_fake_ip_routes(cfg):
+    """Keep active fake-IP pools inside Mihomo's auto-routed TUN ranges.
+
+    Mihomo accepts a fake-IP pool covered by ``route-exclude-address`` but
+    sing-tun then removes that pool from its routing table. DNS succeeds while
+    application connections bypass the TUN and blackhole. Preserve every
+    non-overlapping part of each subscription exclusion instead of dropping
+    the whole CIDR.
+    """
+    tun = cfg.get("tun")
+    dns = cfg.get("dns")
+    if not isinstance(tun, dict) or not isinstance(dns, dict):
+        return cfg
+    if tun.get("enable") is not True or tun.get("auto-route") is not True:
+        return cfg
+    if dns.get("enable") is not True:
+        return cfg
+    if str(dns.get("enhanced-mode", "")).lower() != "fake-ip":
+        return cfg
+
+    pools = []
+    fake_ipv4 = _ip_network(dns.get("fake-ip-range", "198.18.0.1/16"))
+    if fake_ipv4 is not None and fake_ipv4.version == 4:
+        pools.append(fake_ipv4)
+    if cfg.get("ipv6") is True:
+        fake_ipv6 = _ip_network(dns.get("fake-ip-range6"))
+        if fake_ipv6 is not None and fake_ipv6.version == 6:
+            pools.append(fake_ipv6)
+    if not pools:
+        return cfg
+
+    for key in (
+        "route-exclude-address",
+        "inet4-route-exclude-address",
+        "inet6-route-exclude-address",
+    ):
+        values = tun.get(key)
+        if not isinstance(values, list):
+            continue
+        normalized = []
+        for value in values:
+            network = _ip_network(value)
+            if network is None:
+                normalized.append(value)
+                continue
+            fragments = _subtract_networks(network, pools)
+            if len(fragments) == 1 and fragments[0] == network:
+                normalized.append(value)
+            else:
+                normalized.extend(str(fragment) for fragment in fragments)
+        tun[key] = normalized
+
+    route_fields = (
+        "route-address",
+        "inet4-route-address",
+        "inet6-route-address",
+    )
+    parsed_routes = []
+    for key in route_fields:
+        values = tun.get(key)
+        if isinstance(values, list):
+            parsed_routes.extend(
+                network for value in values
+                if (network := _ip_network(value)) is not None
+            )
+
+    route_address = tun.get("route-address")
+    if route_address is None:
+        route_address = []
+    if isinstance(route_address, list):
+        route_address = list(route_address)
+        changed = False
+        for pool in pools:
+            same_family = [
+                route for route in parsed_routes if route.version == pool.version
+            ]
+            if same_family and not any(pool.subnet_of(route) for route in same_family):
+                route_address.append(str(pool))
+                parsed_routes.append(pool)
+                changed = True
+        if changed:
+            tun["route-address"] = route_address
+
+    return cfg
+
+
+def load_extra_rules():
+    """Return persistent overlay rules from extra-rules.yaml (empty if absent)."""
+    try:
+        content = read_regular_text(EXTRA_RULES, 128 * 1024)
+    except FileNotFoundError:
+        return []
+    except OSError as error:
+        die(f"cannot read {EXTRA_RULES}: {error}", EXIT_GENERAL)
+    try:
+        data = yaml.safe_load(content)
+    except yaml.YAMLError as error:
+        die(f"invalid YAML in {EXTRA_RULES}: {error}", EXIT_INVALID_INPUT)
+    if not isinstance(data, dict):
+        die(f"{EXTRA_RULES} is not a YAML object", EXIT_INVALID_INPUT)
+    rules = data.get("rules")
+    if rules is None:
+        return []
+    if not isinstance(rules, list) or not all(
+        isinstance(rule, str) for rule in rules
+    ):
+        die(f"{EXTRA_RULES} 'rules' must be a list of strings", EXIT_INVALID_INPUT)
+    return rules
+
+
+def merge_extra_rules(cfg):
+    """Prepend persistent overlay rules so they beat subscription rules."""
+    rules = load_extra_rules()
+    if not rules:
+        return cfg
+    current = cfg.get("rules")
+    if current is None:
+        cfg["rules"] = list(rules)
+    elif isinstance(current, list):
+        cfg["rules"] = list(rules) + current
+    else:
+        die(
+            "cannot merge overlay rules: subscription 'rules' is not a list",
+            EXIT_INVALID_INPUT,
+        )
+    return cfg
+
+
+def build_config(base_cfg, controller_secret="", capture_mode=None):
+    """Apply deployment settings and native cross-field safety invariants."""
+    cfg = copy.deepcopy(base_cfg)
+    cfg["external-controller"] = controller_address()
+    cfg["secret"] = controller_secret
+    if capture_mode is not None:
+        if capture_mode not in {"tun", "proxy"}:
+            die("capture mode must be: tun, proxy, or inherit", EXIT_INVALID_INPUT)
+        tun = cfg.get("tun")
+        if tun is None:
+            tun = {}
+        elif not isinstance(tun, dict):
+            die(
+                "cannot override tun.enable because subscription 'tun' is not an object",
+                EXIT_INVALID_INPUT,
+            )
+        else:
+            tun = copy.deepcopy(tun)
+        tun["enable"] = capture_mode == "tun"
+        cfg["tun"] = tun
+    return merge_extra_rules(normalize_fake_ip_routes(cfg))
+
+
+def validate_config(path):
+    subprocess.run(
+        [MIHOMO_BIN, "-t", "-d", str(ETC), "-f", str(path)],
+        check=True,
+    )
+
+
+def install_generated_config(cfg):
+    """Validate a staged config before atomically replacing config.yaml."""
+    with operation_lock():
+        ETC.mkdir(parents=True, exist_ok=True, mode=0o700)
+        staged = _stage_text(CFG, dump_yaml(cfg), mode=0o600)
+        try:
+            validate_config(staged)
+            os.replace(staged, CFG)
+        finally:
+            staged.unlink(missing_ok=True)
+
+
+def install_subscription(content, data, controller_secret=None):
+    """Validate subscription-derived config before replacing active files."""
+    with operation_lock():
+        if controller_secret is None:
+            controller_secret = get_controller_secret(create=True)
+        cfg = build_config(data, controller_secret, read_capture_mode())
+        ETC.mkdir(parents=True, exist_ok=True, mode=0o700)
+        staged_base = _stage_text(BASE_CFG, content, mode=0o600)
+        staged_cfg = _stage_text(CFG, dump_yaml(cfg), mode=0o600)
+        backups = {}
+        replaced = []
+        try:
+            validate_config(staged_cfg)
+            for target in (BASE_CFG, CFG):
+                if target.exists():
+                    backups[target] = _stage_text(
+                        target,
+                        target.read_text(encoding="utf-8"),
+                        mode=0o600,
+                    )
+                else:
+                    backups[target] = None
+
+            os.replace(staged_base, BASE_CFG)
+            replaced.append(BASE_CFG)
+            os.replace(staged_cfg, CFG)
+            replaced.append(CFG)
+        except Exception:
+            for target in reversed(replaced):
+                backup = backups.get(target)
+                if backup is None:
+                    target.unlink(missing_ok=True)
+                else:
+                    os.replace(backup, target)
+            raise
+        finally:
+            staged_base.unlink(missing_ok=True)
+            staged_cfg.unlink(missing_ok=True)
+            for backup in backups.values():
+                if backup is not None:
+                    backup.unlink(missing_ok=True)
+
+
+def generate_config(base_cfg=None):
     need_root("generating config")
 
-    state = read_state()
-    mode = state.get("mode") or "tun"
+    with operation_lock():
+        base_cfg = load_yaml(BASE_CFG) if base_cfg is None else base_cfg
+        cfg = build_config(
+            base_cfg,
+            get_controller_secret(create=True),
+            read_capture_mode(),
+        )
+        install_generated_config(cfg)
 
-    cfg = load_yaml(BASE_CFG)
+    print(f"generated {CFG}")
 
-    cfg["mixed-port"] = MIXED_PORT
-    cfg["allow-lan"] = False
-    cfg["mode"] = cfg.get("mode", "rule")
-    cfg["log-level"] = cfg.get("log-level", "info")
 
-    cfg["external-controller"] = "127.0.0.1:9090"
-    cfg["secret"] = ""
+def snapshot_runtime_files():
+    """Capture files that must roll back together after a failed restart."""
+    snapshots = {}
+    specs = (
+        (BASE_CFG, 0o600, False),
+        (CFG, 0o600, False),
+        (CAPTURE_MODE, 0o600, False),
+        (EXTRA_RULES, 0o600, False),
+        (VAR / "controller.secret", 0o640, True),
+    )
+    for path, mode, preserve_owner in specs:
+        try:
+            content = read_regular_text(path, 128 * 1024 * 1024)
+        except FileNotFoundError:
+            content = None
+        snapshots[path] = (content, mode, preserve_owner)
+    return snapshots
 
-    profile = cfg.get("profile")
-    if not isinstance(profile, dict):
-        profile = {}
-    profile["store-selected"] = True
-    profile.setdefault("store-fake-ip", True)
-    cfg["profile"] = profile
 
-    tun = cfg.get("tun")
-    if not isinstance(tun, dict):
-        tun = {}
-
-    tun["enable"] = mode == "tun"
-    tun["stack"] = "gvisor"
-    tun.setdefault("auto-route", True)
-    tun.setdefault("auto-detect-interface", True)
-    tun["strict-route"] = False
-
-    if mode == "tun":
-        tun["dns-hijack"] = ["any:53"]
-    else:
-        tun.pop("dns-hijack", None)
-
-    fake_excludes = {
-        "198.18.0.0/15",
-        "198.18.0.0/16",
-        "198.19.0.0/16",
-        "198.18.0.0/24",
-        "198.18.0.0/30",
-    }
-
-    excludes = tun.get("route-exclude-address")
-    if isinstance(excludes, list):
-        tun["route-exclude-address"] = [
-            x for x in excludes
-            if str(x).strip() not in fake_excludes
-        ]
-
-    cfg["tun"] = tun
-
-    cfg["ipv6"] = False
-
-    # Apply DNS overrides from state (only what's explicitly set)
-    dns_overrides = state.get("dns", {})
-
-    dns = cfg.get("dns")
-    if not isinstance(dns, dict):
-        dns = {}
-        dns["enable"] = True
-
-    if "enhanced-mode" in dns_overrides:
-        dns["enhanced-mode"] = dns_overrides["enhanced-mode"]
-
-    if "nameservers" in dns_overrides:
-        dns["nameserver"] = dns_overrides["nameservers"]
-
-    if "fallback" in dns_overrides:
-        dns["fallback"] = dns_overrides["fallback"]
-
-    cfg["dns"] = dns
-
-    ETC.mkdir(parents=True, exist_ok=True)
-    save_yaml(CFG, cfg)
-
-    subprocess.run(["/usr/local/bin/mihomo", "-t", "-d", str(ETC)], check=True)
-    print(f"generated {CFG} mode={mode}")
+def restore_runtime_files(snapshots):
+    for path, (content, mode, preserve_owner) in snapshots.items():
+        if content is None:
+            path.unlink(missing_ok=True)
+        else:
+            atomic_write_text(
+                path,
+                content,
+                mode=mode,
+                preserve_owner=preserve_owner,
+            )
 
 
 def http_json(method, path, body=None, timeout=8):
+    controller_address()
     url = CONTROLLER + path
     data = None
     headers = {}
@@ -180,6 +550,14 @@ def http_json(method, path, body=None, timeout=8):
         headers["Content-Type"] = "application/json"
 
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    controller = urllib.parse.urlsplit(CONTROLLER)
+    if controller.hostname in {"127.0.0.1", "localhost", "::1"}:
+        controller_secret = get_controller_secret(create=False)
+        if controller_secret:
+            # urllib does not copy unredirected headers to redirect requests.
+            req.add_unredirected_header(
+                "Authorization", f"Bearer {controller_secret}"
+            )
 
     with urllib.request.urlopen(req, timeout=timeout) as r:
         raw = r.read()
@@ -194,79 +572,184 @@ def wait_api(timeout=20):
     while time.time() < end:
         try:
             return http_json("GET", "/version")
+        except urllib.error.HTTPError as error:
+            code = error.code
+            error.close()
+            if code in {401, 403}:
+                die(
+                    "mihomo API rejected controller.secret; regenerate config",
+                    EXIT_AUTH_FAILED,
+                )
+            die(f"mihomo API returned HTTP {code}", EXIT_API_DOWN)
         except Exception as e:
             last = e
             time.sleep(0.5)
     die(f"mihomo API is not responding at {CONTROLLER}: {last}", EXIT_API_DOWN)
 
 
-def get_proxies():
-    wait_api()
-    data = http_json("GET", "/proxies")
-    proxies = data.get("proxies") if isinstance(data, dict) else None
-    if not isinstance(proxies, dict):
-        die("bad /proxies response", EXIT_API_DOWN)
-    return proxies
+def get_groups(wait=True):
+    """Return policy groups keyed by name from Mihomo's native /group API."""
+    if wait:
+        wait_api()
+    data = http_json("GET", "/group")
+    items = data.get("proxies") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        die("bad /group response", EXIT_API_DOWN)
 
-
-def group_members(obj):
-    for key in ("all", "proxies"):
-        val = obj.get(key)
-        if isinstance(val, list):
-            return val
-    return []
-
-
-def is_group(obj):
-    return isinstance(obj, dict) and len(group_members(obj)) > 0
-
-
-def is_selector(obj):
-    if not is_group(obj):
-        return False
-    t = str(obj.get("type", "")).lower()
-    return t in GROUP_TYPES or "selector" in t or "select" in t
-
-
-def is_node_name(name, proxies):
-    if name in NON_NODE_NAMES:
-        return False
-    obj = proxies.get(name)
-    if not isinstance(obj, dict):
-        return True
-    if is_group(obj):
-        return False
-    t = str(obj.get("type", "")).lower()
-    if t in {"direct", "reject"}:
-        return False
-    return True
-
-
-def candidate_groups(proxies):
-    groups = []
-    for name, obj in proxies.items():
-        if is_selector(obj):
-            nodes = [x for x in group_members(obj) if is_node_name(x, proxies)]
-            if nodes:
-                groups.append((name, obj, nodes))
+    groups = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if isinstance(name, str) and name:
+            groups[name] = item
     return groups
 
 
-def get_group_nodes(group, proxies):
-    obj = proxies.get(group)
+def get_runtime_group(name):
+    path = "/group/" + urllib.parse.quote(name, safe="")
+    obj = http_json("GET", path)
+    if not isinstance(obj, dict):
+        die(f"bad runtime group response for: {name}", EXIT_API_DOWN)
+    return obj
+
+
+def group_members(obj):
+    fallback = []
+    for key in ("all", "proxies"):
+        val = obj.get(key)
+        if isinstance(val, list) and val:
+            return val
+        if isinstance(val, list):
+            fallback = val
+    return fallback
+
+
+def group_type(obj):
+    value = str(obj.get("type", "")).lower() if isinstance(obj, dict) else ""
+    return re.sub(r"[^a-z0-9]", "", value)
+
+
+def is_group(obj):
+    if not isinstance(obj, dict):
+        return False
+    if any(isinstance(obj.get(key), list) for key in ("all", "proxies")):
+        return True
+    return group_type(obj) in POLICY_GROUP_TYPES
+
+
+def is_selector(obj):
+    return is_group(obj) and group_type(obj) in SELECTOR_GROUP_TYPES
+
+
+def is_pinnable_group(obj):
+    return is_group(obj) and group_type(obj) in PINNABLE_GROUP_TYPES
+
+
+def visible_groups(groups, include_hidden=False):
+    return [
+        (name, obj)
+        for name, obj in groups.items()
+        if include_hidden or not bool(obj.get("hidden"))
+    ]
+
+
+def get_group_or_die(name, groups):
+    obj = groups.get(name)
     if not is_group(obj):
-        die(f"not a proxy group: {group}", EXIT_NOT_FOUND)
-
-    nodes = group_members(obj)
-    if not nodes:
-        die(f"group has no selectable nodes: {group}", EXIT_NOT_FOUND)
-    return nodes
+        die(f"not a policy group: {name}", EXIT_NOT_FOUND)
+    return obj
 
 
-def select_node(group, node):
+def validate_group_member(group, member, groups):
+    obj = get_group_or_die(group, groups)
+    if member not in group_members(obj):
+        die(
+            f"{member!r} is not an immediate member of {group!r}",
+            EXIT_INVALID_INPUT,
+        )
+    return obj
+
+
+def put_group_member(group, member):
     path = "/proxies/" + urllib.parse.quote(group, safe="")
-    http_json("PUT", path, {"name": node})
-    print(f"selected: {group} -> {node}")
+    http_json("PUT", path, {"name": member})
+
+
+def delete_group_pin(group):
+    path = "/proxies/" + urllib.parse.quote(group, safe="")
+    http_json("DELETE", path)
+
+
+def get_group_leaf_proxies(group, groups):
+    """Expand immediate group edges into unique, testable leaf proxies."""
+    get_group_or_die(group, groups)
+    leaves = []
+    seen_leaves = set()
+
+    def visit(name, ancestors):
+        if name in NON_TESTABLE_PROXIES or name in ancestors:
+            return
+        obj = groups.get(name)
+        if is_group(obj):
+            for member in group_members(obj):
+                visit(member, ancestors | {name})
+            return
+        if name not in seen_leaves:
+            seen_leaves.add(name)
+            leaves.append(name)
+
+    visit(group, set())
+    if not leaves:
+        die(f"group has no testable leaf proxies: {group}", EXIT_NOT_FOUND)
+    return leaves
+
+
+def active_group_resolution(name, groups):
+    """Resolve current ``now`` edges without pretending this is one global route."""
+    chain = []
+    seen = set()
+    current = name
+    terminal = None
+
+    while True:
+        if current in seen:
+            terminal = f"cycle:{current}"
+            break
+        seen.add(current)
+        chain.append(current)
+
+        obj = groups.get(current)
+        if not is_group(obj):
+            break
+
+        members = group_members(obj)
+        now = obj.get("now")
+        if not isinstance(now, str) or not now:
+            if group_type(obj) == "loadbalance":
+                terminal = "per-request"
+            else:
+                terminal = "no-active-edge"
+            break
+        if now not in members:
+            chain.append(now)
+            terminal = "inconsistent-runtime-edge"
+            break
+        current = now
+
+    return chain, terminal
+
+
+def format_group_resolution(name, obj, groups):
+    chain, terminal = active_group_resolution(name, groups)
+    flags = [str(obj.get("type", "unknown"))]
+    if obj.get("hidden"):
+        flags.append("hidden")
+    if is_pinnable_group(obj):
+        fixed = obj.get("fixed")
+        flags.append(f"pinned={fixed}" if fixed else "auto")
+    suffix = f" [{terminal}]" if terminal else ""
+    return f"{' -> '.join(chain)}  ({', '.join(flags)}){suffix}"
 
 
 def fzf_select(items, prompt):
@@ -277,7 +760,8 @@ def fzf_select(items, prompt):
             text=True,
             stdout=subprocess.PIPE,
         )
-        result = p.stdout.strip()
+        # Display prefixes carry state; only remove fzf's line terminator.
+        result = p.stdout.rstrip("\r\n")
         return result if result else None
     else:
         for i, item in enumerate(items, 1):
@@ -291,176 +775,383 @@ def fzf_select(items, prompt):
         return None
 
 
-def cmd_node_pick(args):
-    proxies = get_proxies()
-    state = read_state()
-
-    group = state.get("group")
-    if not group:
-        die("no default group set. Run: mihomoctl node group", EXIT_NOT_FOUND)
-
-    nodes = get_group_nodes(group, proxies)
-    now = proxies[group].get("now", "")
-
-    items = []
-    for n in nodes:
-        prefix = "* " if n == now else "  "
-        items.append(f"{prefix}{n}")
-
-    result = fzf_select(items, f"{group}> ")
-    if not result:
-        raise SystemExit(EXIT_OK)
-
-    node = result.lstrip("* ").strip()
-
-    select_node(group, node)
-
-    state["node"] = node
-    write_state(state)
+def fzf_select_value(options, prompt):
+    """Select from ``(display, value)`` pairs without parsing display text."""
+    result = fzf_select([display for display, _ in options], prompt)
+    if result is None:
+        return None
+    for display, value in options:
+        if display == result:
+            return value
+    return None
 
 
-def test_node_latency(group, node):
+def test_proxy_latency(name):
     """Returns latency in ms or None on timeout."""
     try:
-        path = f"/proxies/{urllib.parse.quote(group, safe='')}/delay"
-        params = f"timeout=5000&url=http://www.gstatic.com/generate_204&target={urllib.parse.quote(node, safe='')}"
+        path = f"/proxies/{urllib.parse.quote(name, safe='')}/delay"
+        params = urllib.parse.urlencode({
+            "timeout": 5000,
+            "url": "http://www.gstatic.com/generate_204",
+        })
         data = http_json("GET", f"{path}?{params}")
-        return data.get("delay")
+        return data.get("delay") if isinstance(data, dict) else None
     except Exception:
         return None
 
 
-def cmd_node_test(args):
-    state = read_state()
-    group = state.get("group")
-    if not group:
-        die("no default group set. Run: mihomoctl node group", EXIT_NOT_FOUND)
+def effective_leaf_proxy(name, groups):
+    chain, terminal = active_group_resolution(name, groups)
+    if terminal:
+        die(f"cannot resolve {name!r} to one proxy: {terminal}", EXIT_NOT_FOUND)
+    return chain[-1]
 
-    proxies = get_proxies()
 
-    if args.all:
-        nodes = get_group_nodes(group, proxies)
-    else:
-        current = proxies[group].get("now")
-        if not current:
-            die("no node selected in group", EXIT_NOT_FOUND)
-        nodes = [current]
+def cmd_proxy_test(args):
+    groups = get_groups()
+    targets = []
+    for name in args.targets:
+        if name in groups:
+            resolved = (
+                get_group_leaf_proxies(name, groups)
+                if args.all
+                else [effective_leaf_proxy(name, groups)]
+            )
+        else:
+            resolved = [name]
+        for target in resolved:
+            if target not in targets and target not in NON_TESTABLE_PROXIES:
+                targets.append(target)
 
-    # Test nodes with progress indicator
+    if not targets:
+        die("no testable proxies", EXIT_NOT_FOUND)
+
     results = []
-    if args.all:
-        print(f"\n  Testing {len(nodes)} nodes in {group}...")
-        for i, node in enumerate(nodes, 1):
-            sys.stdout.write(f"\r  [{i}/{len(nodes)}] {node}...")
-            sys.stdout.flush()
-            latency = test_node_latency(group, node)
-            results.append((node, latency))
-        sys.stdout.write("\r" + " " * 50 + "\r")
+    print(f"\n  Testing {len(targets)} prox{'y' if len(targets) == 1 else 'ies'}...")
+    for index, target in enumerate(targets, 1):
+        sys.stdout.write(f"\r  [{index}/{len(targets)}] {target}...")
         sys.stdout.flush()
-    else:
-        node = nodes[0]
-        sys.stdout.write(f"\r  Testing {node}...")
-        sys.stdout.flush()
-        latency = test_node_latency(group, node)
-        results.append((node, latency))
-        sys.stdout.write("\r" + " " * 50 + "\r")
-        sys.stdout.flush()
+        results.append((target, test_proxy_latency(target)))
+    sys.stdout.write("\r" + " " * 70 + "\r")
+    sys.stdout.flush()
 
-    if not results:
-        die("no results", EXIT_GENERAL)
-
-    # Show results in fzf or formatted table
-    if args.all and shutil.which("fzf"):
-        items = []
-        for node, lat in results:
-            lat_str = f"{lat}ms" if lat else "timeout"
-            marker = "* " if node == proxies[group].get("now") else "  "
-            items.append(f"{marker}{node:<30} {lat_str:>10}")
-        # Sort: timeouts last, then by latency
-        items.sort(key=lambda x: ("timeout" in x, x))
-
-        p = subprocess.run(
-            ["fzf", "--prompt", f"{group} results> ", "--no-sort"],
-            input="\n".join(items) + "\n",
-            text=True,
-            stdout=subprocess.PIPE,
-        )
-    else:
-        # Fallback: formatted table
-        results.sort(key=lambda x: x[1] if x[1] else float('inf'))
-        print(f"\n  {'node':<30} {'latency':>10}")
-        print(f"  {'-'*42}")
-        for node, lat in results:
-            lat_str = f"{lat}ms" if lat else "timeout"
-            marker = "* " if node == proxies[group].get("now") else "  "
-            print(f"  {marker}{node:<28} {lat_str:>10}")
+    results.sort(key=lambda item: (
+        item[1] is None,
+        item[1] if item[1] is not None else float("inf"),
+        item[0],
+    ))
+    print(f"\n  {'proxy':<40} {'latency':>10}")
+    print(f"  {'-'*52}")
+    for target, latency in results:
+        latency_text = f"{latency}ms" if latency is not None else "timeout"
+        print(f"  {target:<40} {latency_text:>10}")
     print()
 
 
-def cmd_node_group(args):
-    proxies = get_proxies()
-    state = read_state()
+def cmd_group_list(args):
+    groups = get_groups()
+    items = visible_groups(groups, include_hidden=args.all)
+    if not items:
+        die("no policy groups found", EXIT_NOT_FOUND)
+    for name, obj in items:
+        print(f"  {format_group_resolution(name, obj, groups)}")
 
-    groups = candidate_groups(proxies)
-    if not groups:
-        die("no proxy groups found", EXIT_NOT_FOUND)
 
-    items = []
-    for name, obj, nodes in groups:
-        prefix = "* " if name == state.get("group") else "  "
-        t = str(obj.get("type", "")).lower()
-        items.append(f"{prefix}{name}  ({t})")
+def cmd_group_show(args):
+    groups = get_groups()
+    obj = get_group_or_die(args.group, groups)
+    print(format_group_resolution(args.group, obj, groups))
+    print("  members:")
+    current = obj.get("now")
+    for member in group_members(obj):
+        marker = "*" if member == current else " "
+        child = groups.get(member)
+        child_type = f" ({child.get('type')})" if is_group(child) else ""
+        print(f"   {marker} {member}{child_type}")
 
-    result = fzf_select(items, "group> ")
-    if not result:
-        raise SystemExit(EXIT_OK)
 
-    group = result.split("  ")[0].lstrip("* ").strip()
+def cmd_group_select(args):
+    groups = get_groups()
+    obj = validate_group_member(args.group, args.member, groups)
+    if not is_selector(obj):
+        die(f"group is not a Selector: {args.group}", EXIT_INVALID_INPUT)
+    put_group_member(args.group, args.member)
+    current = get_runtime_group(args.group)
+    if current.get("now") != args.member:
+        die(f"Mihomo did not select {args.member!r} in {args.group!r}", EXIT_GENERAL)
+    print(f"selected: {args.group} -> {args.member}")
 
-    # Pick node within group
-    nodes = group_members(proxies[group])
-    if not nodes:
-        die(f"group has no selectable nodes: {group}", EXIT_NOT_FOUND)
 
-    node_items = []
-    current = proxies[group].get("now", "")
-    for n in nodes:
-        prefix = "* " if n == current else "  "
-        node_items.append(f"{prefix}{n}")
+def cmd_group_pin(args):
+    groups = get_groups()
+    obj = validate_group_member(args.group, args.member, groups)
+    if not is_pinnable_group(obj):
+        die(
+            f"group is not pinnable URLTest/Fallback: {args.group}",
+            EXIT_INVALID_INPUT,
+        )
+    put_group_member(args.group, args.member)
+    current = get_runtime_group(args.group)
+    if current.get("fixed") != args.member:
+        die(f"Mihomo did not pin {args.member!r} in {args.group!r}", EXIT_GENERAL)
+    print(f"pinned: {args.group} -> {args.member}")
 
-    node_result = fzf_select(node_items, f"{group}> ")
-    if not node_result:
-        raise SystemExit(EXIT_OK)
 
-    node = node_result.lstrip("* ").strip()
+def cmd_group_unpin(args):
+    groups = get_groups()
+    obj = get_group_or_die(args.group, groups)
+    if not is_pinnable_group(obj):
+        die(
+            f"group is not pinnable URLTest/Fallback: {args.group}",
+            EXIT_INVALID_INPUT,
+        )
+    delete_group_pin(args.group)
+    current = get_runtime_group(args.group)
+    if current.get("fixed"):
+        die(f"Mihomo did not return {args.group!r} to automatic mode", EXIT_GENERAL)
+    print(f"automatic: {args.group}")
 
-    select_node(group, node)
 
-    state["group"] = group
-    state["node"] = node
-    write_state(state)
+def structural_route_roots(groups):
+    incoming = set()
+    for name, obj in groups.items():
+        if name == "GLOBAL":
+            continue
+        incoming.update(member for member in group_members(obj) if member in groups)
+    return [name for name in groups if name != "GLOBAL" and name not in incoming]
+
+
+def discover_route_roots(groups, config, rules=None):
+    mode = str(config.get("mode", "rule")).lower()
+    if mode == "direct":
+        return ["DIRECT"]
+    if mode == "global":
+        return ["GLOBAL"]
+
+    roots = []
+    if isinstance(rules, list):
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            extra = rule.get("extra")
+            if isinstance(extra, dict) and extra.get("disabled"):
+                continue
+            target = rule.get("proxy")
+            if isinstance(target, str) and target and target not in roots:
+                roots.append(target)
+    return roots or structural_route_roots(groups)
+
+
+def get_route_roots(groups):
+    config = http_json("GET", "/configs")
+    if not isinstance(config, dict):
+        die("bad /configs response", EXIT_API_DOWN)
+    rules = None
+    if str(config.get("mode", "rule")).lower() == "rule":
+        try:
+            response = http_json("GET", "/rules")
+            if isinstance(response, dict) and isinstance(response.get("rules"), list):
+                rules = response["rules"]
+        except Exception as error:
+            print(
+                f"warning: cannot read /rules; using structural roots: {error}",
+                file=sys.stderr,
+            )
+    return discover_route_roots(groups, config, rules)
+
+
+def plan_route_selection(root, groups):
+    """Collect Selector edges without changing runtime state."""
+    edges = []
+    current = root
+    seen = set()
+
+    while True:
+        if current in seen:
+            die(f"cycle while traversing route at: {current}", EXIT_INVALID_INPUT)
+        seen.add(current)
+        obj = groups.get(current)
+        if not is_selector(obj):
+            return edges
+
+        members = group_members(obj)
+        if not members:
+            die(f"Selector has no members: {current}", EXIT_NOT_FOUND)
+
+        if len(members) == 1:
+            member = members[0]
+        else:
+            options = []
+            now = obj.get("now")
+            for member_name in members:
+                child = groups.get(member_name)
+                child_type = (
+                    f"  ({child.get('type')})" if is_group(child) else ""
+                )
+                marker = "* " if member_name == now else "  "
+                options.append((f"{marker}{member_name}{child_type}", member_name))
+            member = fzf_select_value(options, f"{current}> ")
+            if member is None:
+                raise SystemExit(EXIT_OK)
+
+        if obj.get("now") != member:
+            edges.append((current, member))
+        child = groups.get(member)
+        if not is_selector(child):
+            return edges
+        current = member
+
+
+def apply_route_selection(edges, groups):
+    """Apply validated Selector edges deepest-first; core owns persistence."""
+    for group, member in edges:
+        obj = validate_group_member(group, member, groups)
+        if not is_selector(obj):
+            die(f"route edge is not a Selector: {group}", EXIT_INVALID_INPUT)
+
+    applied = []
+    try:
+        for group, member in reversed(edges):
+            put_group_member(group, member)
+            applied.append((group, member))
+    except Exception:
+        if applied:
+            rendered = ", ".join(f"{group}->{member}" for group, member in applied)
+            print(
+                f"warning: route update was partial; applied: {rendered}",
+                file=sys.stderr,
+            )
+        raise
+
+    for group, member in applied:
+        current = get_runtime_group(group)
+        if current.get("now") != member:
+            die(f"Mihomo did not select {member!r} in {group!r}", EXIT_GENERAL)
+
+
+def cmd_route_status(args):
+    groups = get_groups()
+    roots = args.roots or get_route_roots(groups)
+    if not roots:
+        die("no route roots found", EXIT_NOT_FOUND)
+    for root in roots:
+        chain, terminal = active_group_resolution(root, groups)
+        suffix = f" [{terminal}]" if terminal else ""
+        print(f"  {' -> '.join(chain)}{suffix}")
+
+
+def cmd_route_pick(args):
+    groups = get_groups()
+    if args.root:
+        root = args.root
+    else:
+        roots = [root for root in get_route_roots(groups) if root in groups]
+        if not roots:
+            die("no selectable route roots found", EXIT_NOT_FOUND)
+        if len(roots) == 1:
+            root = roots[0]
+        else:
+            options = []
+            for root_name in roots:
+                obj = groups[root_name]
+                options.append((format_group_resolution(root_name, obj, groups), root_name))
+            root = fzf_select_value(options, "route root> ")
+            if root is None:
+                raise SystemExit(EXIT_OK)
+
+    if root not in groups:
+        die(f"route root is not a policy group: {root}", EXIT_NOT_FOUND)
+    edges = plan_route_selection(root, groups)
+    if not edges:
+        print("route selection unchanged")
+        return
+    apply_route_selection(edges, groups)
+    print("selected route:")
+    chain, terminal = active_group_resolution(root, get_groups(wait=False))
+    suffix = f" [{terminal}]" if terminal else ""
+    print(f"  {' -> '.join(chain)}{suffix}")
 
 
 def cmd_enable(args):
     need_root("enabling mihomo")
-    subprocess.run(["systemctl", "enable", "--now", "mihomo.service"], check=True)
+    with operation_lock():
+        generate_config()
+        subprocess.run(
+            [SYSTEMCTL, "enable", "--now", "mihomo.service"], check=True
+        )
     print("mihomo enabled and started")
 
 
 def cmd_disable(args):
     need_root("disabling mihomo")
-    subprocess.run(["systemctl", "disable", "--now", "mihomo.service"], check=True)
+    with operation_lock():
+        subprocess.run(
+            [SYSTEMCTL, "disable", "--now", "mihomo.service"], check=True
+        )
     print("mihomo stopped and disabled")
 
 
-def cmd_status(args):
-    state = read_state()
+def redact_url(url):
+    """Show only subscription origin; paths and query strings often hold tokens."""
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme in {"http", "https"} and parsed.hostname:
+        host = parsed.hostname
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        try:
+            port = parsed.port
+        except ValueError:
+            return "configured"
+        if port:
+            host = f"{host}:{port}"
+        return f"{parsed.scheme}://{host}/…"
+    return "configured"
 
+
+def print_subscription_status():
+    try:
+        sub_url = SUB_URL.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        print("  url:        \033[33mnot set\033[0m")
+        return
+    except PermissionError:
+        print("  url:        \033[33mconfigured (root-only)\033[0m")
+        return
+    except OSError as error:
+        print(f"  url:        \033[31munreadable ({error})\033[0m")
+        return
+
+    if not sub_url:
+        print("  url:        \033[33mnot set\033[0m")
+        return
+
+    print(f"  url:        {redact_url(sub_url)}")
+    try:
+        age_hours = (time.time() - BASE_CFG.stat().st_mtime) / 3600
+    except FileNotFoundError:
+        print("  last update: \033[33mnever (run: sudo mihomoctl sub update)\033[0m")
+        return
+    except OSError as error:
+        print(f"  last update: \033[33munavailable ({error})\033[0m")
+        return
+
+    if age_hours > 24:
+        print(
+            f"  last update: \033[33m{int(age_hours)}h ago "
+            "(run: sudo mihomoctl sub update)\033[0m"
+        )
+    elif age_hours < 1:
+        print(f"  last update: {int(age_hours * 60)}m ago")
+    else:
+        print(f"  last update: {int(age_hours)}h ago")
+
+
+def cmd_status(args):
     # Service section
     print("\033[1m── Service ──────────────\033[0m")
     try:
         subprocess.run(
-            ["systemctl", "is-active", "--quiet", "mihomo.service"],
+            [SYSTEMCTL, "is-active", "--quiet", "mihomo.service"],
             check=True,
         )
         print("  status:     \033[32mactive\033[0m")
@@ -474,42 +1165,26 @@ def cmd_status(args):
     except Exception:
         print("  version:    \033[31munknown (API down)\033[0m")
 
-    print(f"  mode:       {state.get('mode', 'tun')}")
-
     # Subscription section
     print()
     print("\033[1m── Subscription ─────────\033[0m")
-    if SUB_URL.exists():
-        sub_url = SUB_URL.read_text().strip()
-        if sub_url:
-            # Mask URL if too long
-            display_url = sub_url if len(sub_url) <= 50 else sub_url[:47] + "..."
-            print(f"  url:        {display_url}")
-
-            # Check subscription age
-            age_hours = (time.time() - BASE_CFG.stat().st_mtime) / 3600
-            if age_hours > 24:
-                age_str = f"{int(age_hours)}h ago"
-                print(f"  last update: \033[33m{age_str} (run: sudo mihomoctl sub update)\033[0m")
-            else:
-                if age_hours < 1:
-                    age_str = f"{int(age_hours * 60)}m ago"
-                else:
-                    age_str = f"{int(age_hours)}h ago"
-                print(f"  last update: {age_str}")
-        else:
-            print("  url:        \033[33mnot set\033[0m")
-    else:
-        print("  url:        \033[33mnot set\033[0m")
+    print_subscription_status()
 
     # Routing section
     print()
     print("\033[1m── Routing ──────────────\033[0m")
-    group = state.get("group")
-    node = state.get("node")
-    not_set = "\033[33mnot set\033[0m"
-    print(f"  group:      {group or not_set}")
-    print(f"  node:       {node or not_set}")
+    try:
+        groups = get_groups(wait=False)
+        roots = get_route_roots(groups)
+        if roots:
+            for root in roots:
+                chain, terminal = active_group_resolution(root, groups)
+                suffix = f" [{terminal}]" if terminal else ""
+                print(f"  {' -> '.join(chain)}{suffix}")
+        else:
+            print("  unavailable (no route roots)")
+    except Exception as error:
+        print(f"  unavailable ({error})")
 
     # Network section
     print()
@@ -517,6 +1192,7 @@ def cmd_status(args):
     try:
         cfg = http_json("GET", "/configs")
         print(f"  api:        \033[32mok\033[0m (127.0.0.1:9090)")
+        print(f"  mode:       {cfg.get('mode')}")
         print(f"  mixed-port: {cfg.get('mixed-port')}")
         tun = cfg.get("tun") if isinstance(cfg.get("tun"), dict) else {}
         tun_enabled = tun.get("enable", False)
@@ -530,41 +1206,158 @@ def cmd_status(args):
     print()
 
 
-def cmd_mode(args):
-    state = read_state()
+def service_is_active():
+    return subprocess.run(
+        [SYSTEMCTL, "is-active", "--quiet", "mihomo.service"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).returncode == 0
 
-    if not args.value:
-        print(state.get("mode", "tun"))
+
+def tun_enabled(config):
+    """Return the effective native tun.enable value from a config object."""
+    if not isinstance(config, dict):
+        die("bad Mihomo config response", EXIT_API_DOWN)
+    tun = config.get("tun")
+    if tun is None:
+        return False
+    if not isinstance(tun, dict):
+        die("Mihomo config 'tun' is not an object", EXIT_INVALID_INPUT)
+    value = tun.get("enable", False)
+    if not isinstance(value, bool):
+        die("Mihomo config 'tun.enable' is not boolean", EXIT_INVALID_INPUT)
+    return value
+
+
+def runtime_tun_enabled():
+    return tun_enabled(http_json("GET", "/configs"))
+
+
+def patch_runtime_tun(enabled):
+    """Change only the live TUN listener state through Mihomo's native API."""
+    http_json("PATCH", "/configs", {"tun": {"enable": enabled}})
+    if runtime_tun_enabled() != enabled:
+        die("Mihomo did not apply tun.enable", EXIT_GENERAL)
+
+
+def install_capture_config(capture_mode, cfg):
+    """Validate and commit capture-mode plus its generated config."""
+    ETC.mkdir(parents=True, exist_ok=True, mode=0o700)
+    staged_cfg = _stage_text(CFG, dump_yaml(cfg), mode=0o600)
+    staged_mode = None
+    if capture_mode is not None:
+        staged_mode = _stage_text(
+            CAPTURE_MODE,
+            capture_mode + "\n",
+            mode=0o600,
+        )
+    try:
+        validate_config(staged_cfg)
+        if staged_mode is None:
+            CAPTURE_MODE.unlink(missing_ok=True)
+        else:
+            os.replace(staged_mode, CAPTURE_MODE)
+        os.replace(staged_cfg, CFG)
+    finally:
+        staged_cfg.unlink(missing_ok=True)
+        if staged_mode is not None:
+            staged_mode.unlink(missing_ok=True)
+
+
+def cmd_mode(args):
+    if args.value is None:
+        try:
+            enabled = runtime_tun_enabled()
+        except Exception:
+            need_root("reading capture mode while Mihomo is inactive")
+            enabled = tun_enabled(load_yaml(CFG))
+        print("tun" if enabled else "proxy")
         return
 
-    if args.value not in {"tun", "proxy"}:
-        die("mode must be: tun or proxy", EXIT_INVALID_INPUT)
+    if args.value not in {"tun", "proxy", "inherit"}:
+        die("mode must be: tun, proxy, or inherit", EXIT_INVALID_INPUT)
+    need_root("changing capture mode")
 
-    need_root("changing mode")
+    capture_mode = None if args.value == "inherit" else args.value
+    with operation_lock():
+        was_active = service_is_active()
+        previous_runtime = runtime_tun_enabled() if was_active else None
+        snapshots = snapshot_runtime_files()
+        runtime_change_attempted = False
+        try:
+            base_cfg = load_yaml(BASE_CFG)
+            cfg = build_config(
+                base_cfg,
+                get_controller_secret(create=True),
+                capture_mode,
+            )
+            desired_runtime = tun_enabled(cfg)
+            install_capture_config(capture_mode, cfg)
+            if was_active:
+                runtime_change_attempted = True
+                patch_runtime_tun(desired_runtime)
+        except (Exception, SystemExit):
+            try:
+                restore_runtime_files(snapshots)
+            except Exception as rollback_error:
+                print(
+                    f"warning: capture-mode file rollback failed: {rollback_error}",
+                    file=sys.stderr,
+                )
+            if runtime_change_attempted:
+                try:
+                    patch_runtime_tun(previous_runtime)
+                except (Exception, SystemExit) as rollback_error:
+                    print(
+                        f"warning: runtime TUN rollback failed: {rollback_error}",
+                        file=sys.stderr,
+                    )
+            raise
 
-    state["mode"] = args.value
-    write_state(state)
+    suffix = " (inherited from subscription)" if capture_mode is None else ""
+    print(f"mode switched to: {'tun' if desired_runtime else 'proxy'}{suffix}")
 
-    generate_config()
 
-    subprocess.run(["systemctl", "restart", "mihomo.service"], check=True)
-
-    print(f"mode switched to: {args.value}")
+def reload_runtime_config():
+    """Ask the running core to reload config through its native controller API."""
+    http_json(
+        "PUT",
+        "/configs?force=true",
+        {"path": str(CFG), "payload": ""},
+    )
 
 
 def validate_sub_url(url):
     """Validate subscription URL. Returns (ok: bool, message: str)."""
+    headers = {"User-Agent": "mihomo/1.0"}
     try:
-        req = urllib.request.Request(url, method="HEAD",
-                                      headers={"User-Agent": "mihomo/1.0"})
+        req = urllib.request.Request(url, method="HEAD", headers=headers)
         with urllib.request.urlopen(req, timeout=10) as r:
             return True, f"HTTP {r.status}"
     except urllib.error.HTTPError as e:
-        if e.code in (401, 403):
-            return True, f"HTTP {e.code} (auth required, but URL exists)"
-        return False, f"HTTP {e.code}"
+        code = e.code
+        e.close()
+        if code not in (403, 405, 501):
+            return False, f"HTTP {code}"
     except Exception as e:
         return False, str(e)
+
+    # Some subscription endpoints reject HEAD even though GET works.
+    try:
+        req = urllib.request.Request(
+            url,
+            method="GET",
+            headers={**headers, "Range": "bytes=0-0"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            response.read(1)
+            return True, f"HTTP {response.status}"
+    except urllib.error.HTTPError as error:
+        code = error.code
+        error.close()
+        return False, f"HTTP {code}"
+    except Exception as error:
+        return False, str(error)
 
 
 def cmd_sub_set(args):
@@ -592,9 +1385,9 @@ def cmd_sub_set(args):
             print("  aborted")
             raise SystemExit(EXIT_OK)
 
-    ETC.mkdir(parents=True, exist_ok=True)
-    SUB_URL.write_text(url.strip() + "\n")
-    os.chmod(SUB_URL, 0o600)
+    with operation_lock():
+        ETC.mkdir(parents=True, exist_ok=True, mode=0o700)
+        atomic_write_text(SUB_URL, url.strip() + "\n", mode=0o600)
 
     print(f"  saved: {SUB_URL}")
 
@@ -602,87 +1395,186 @@ def cmd_sub_set(args):
 def cmd_sub_update(args):
     need_root("updating subscription")
 
-    if not SUB_URL.exists():
+    try:
+        url = SUB_URL.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
         die("subscription URL missing. Run: sudo mihomoctl sub set", EXIT_NOT_FOUND)
-
-    url = SUB_URL.read_text().strip()
+    except OSError as error:
+        die(f"cannot read subscription URL: {error}", EXIT_GENERAL)
     if not url:
         die("subscription URL is empty", EXIT_INVALID_INPUT)
 
     print("downloading subscription...")
     req = urllib.request.Request(url, headers={"User-Agent": "mihomo/1.0"})
     try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            content = r.read().decode()
-    except urllib.error.URLError as e:
-        die(f"download failed: {e}", EXIT_API_DOWN)
+        with urllib.request.urlopen(req, timeout=60) as response:
+            raw_content = response.read(MAX_SUBSCRIPTION_BYTES + 1)
+    except (urllib.error.URLError, UnicodeDecodeError, OSError) as error:
+        die(f"download failed: {error}", EXIT_API_DOWN)
+    if len(raw_content) > MAX_SUBSCRIPTION_BYTES:
+        die("downloaded subscription is too large", EXIT_INVALID_INPUT)
+    try:
+        content = raw_content.decode("utf-8")
+    except UnicodeDecodeError as error:
+        die(f"downloaded subscription is not UTF-8: {error}", EXIT_INVALID_INPUT)
 
-    data = yaml.safe_load(content)
+    try:
+        data = yaml.safe_load(content)
+    except yaml.YAMLError as error:
+        die(f"downloaded subscription is invalid YAML: {error}", EXIT_INVALID_INPUT)
     if not isinstance(data, dict):
         die("downloaded subscription is not a YAML object", EXIT_INVALID_INPUT)
 
     if not any(k in data for k in ("proxies", "proxy-providers", "proxy-groups", "rules")):
-        print(content[:1000], file=sys.stderr)
         die("downloaded file does not look like a Mihomo/Clash YAML config", EXIT_INVALID_INPUT)
 
-    BASE_CFG.write_text(content)
-    os.chmod(BASE_CFG, 0o600)
-    print(f"saved: {BASE_CFG}")
+    with operation_lock():
+        if SUB_URL.read_text(encoding="utf-8").strip() != url:
+            die(
+                "subscription URL changed during download; run sub update again",
+                EXIT_INVALID_INPUT,
+            )
+        was_active = service_is_active()
+        snapshots = snapshot_runtime_files()
+        committed = False
+        try:
+            install_subscription(content, data)
+            committed = True
+            if was_active:
+                reload_runtime_config()
+        except (Exception, SystemExit):
+            if committed:
+                try:
+                    restore_runtime_files(snapshots)
+                    if was_active:
+                        reload_runtime_config()
+                except (Exception, SystemExit) as rollback_error:
+                    print(
+                        f"warning: subscription rollback failed: {rollback_error}",
+                        file=sys.stderr,
+                    )
+            raise
 
-    generate_config()
-
-    if subprocess.run(["systemctl", "is-active", "--quiet", "mihomo.service"]).returncode == 0:
-        subprocess.run(["systemctl", "restart", "mihomo.service"], check=True)
+        print(f"saved: {BASE_CFG}")
+        print(f"generated: {CFG}")
 
     print("subscription updated")
 
 
 def cmd_restart(args):
     need_root("restarting mihomo")
-    subprocess.run(["systemctl", "restart", "mihomo.service"], check=True)
+    with operation_lock():
+        was_active = service_is_active()
+        snapshots = snapshot_runtime_files()
+        restart_attempted = False
+        try:
+            generate_config()
+            restart_attempted = True
+            subprocess.run([SYSTEMCTL, "restart", "mihomo.service"], check=True)
+        except (Exception, SystemExit):
+            try:
+                restore_runtime_files(snapshots)
+                if restart_attempted and was_active:
+                    subprocess.run(
+                        [SYSTEMCTL, "restart", "mihomo.service"], check=True
+                    )
+            except (Exception, SystemExit) as rollback_error:
+                print(
+                    f"warning: restart rollback failed: {rollback_error}",
+                    file=sys.stderr,
+                )
+            raise
     print("mihomo restarted")
+
+
+def cmd_rules_list(args):
+    rules = load_extra_rules()
+    if not rules:
+        print("  (no overlay rules)")
+        return
+    for rule in rules:
+        print(f"  {rule}")
+
+
+def _apply_extra_rules_change():
+    """Regenerate config with current overlay and reload the live core."""
+    with operation_lock():
+        was_active = service_is_active()
+        snapshots = snapshot_runtime_files()
+        committed = False
+        try:
+            generate_config()
+            committed = True
+            if was_active:
+                reload_runtime_config()
+        except (Exception, SystemExit):
+            if committed:
+                try:
+                    restore_runtime_files(snapshots)
+                    if was_active:
+                        reload_runtime_config()
+                except (Exception, SystemExit) as rollback_error:
+                    print(
+                        f"warning: overlay-rules rollback failed: {rollback_error}",
+                        file=sys.stderr,
+                    )
+            raise
+
+
+def cmd_rules_add(args):
+    need_root("adding overlay rule")
+    added = []
+    with operation_lock():
+        rules = load_extra_rules()
+        for rule in args.rules:
+            rule = rule.strip()
+            if not rule:
+                continue
+            if rule not in rules:
+                rules.append(rule)
+                added.append(rule)
+        atomic_write_text(
+            EXTRA_RULES,
+            dump_yaml({"rules": rules}),
+            mode=0o600,
+        )
+    _apply_extra_rules_change()
+    if not added:
+        print("  no new rules (already present)")
+        return
+    for rule in added:
+        print(f"  added: {rule}")
+
+
+def cmd_rules_clear(args):
+    need_root("clearing overlay rules")
+    with operation_lock():
+        EXTRA_RULES.unlink(missing_ok=True)
+    _apply_extra_rules_change()
+    print("  cleared overlay rules")
 
 
 def cmd_sub_cycle(args):
     need_root("changing update cycle")
 
-    # Read current timer interval
     current = "6h"
     try:
-        result = subprocess.run(
-            ["systemctl", "show", "mihomo-update.timer", "--property=OnUnitActiveSec"],
-            capture_output=True, text=True
-        )
-        if result.returncode == 0:
-            val = result.stdout.split("=", 1)[1].strip()
-            if val:
-                current = val
-    except Exception:
-        pass
-
-    options = ["1h", "2h", "4h", "6h", "12h", "24h", "custom"]
-
-    # Read current value from timer file
-    current = "6h"
-    timer_path = "/etc/systemd/system/mihomo-update.timer"
-    try:
-        content = Path(timer_path).read_text()
-        import re
+        content = TIMER_UNIT.read_text(encoding="utf-8")
         m = re.search(r"OnUnitActiveSec=(.+)", content)
         if m:
             current = m.group(1).strip()
-    except Exception:
-        pass
-    items = []
-    for opt in options:
-        prefix = "* " if opt == current else "  "
-        items.append(f"{prefix}{opt}")
+    except OSError:
+        content = ""
 
-    result = fzf_select(items, "update cycle> ")
-    if not result:
+    choices = ["1h", "2h", "4h", "6h", "12h", "24h", "custom"]
+    options = [
+        (f"{'* ' if choice == current else '  '}{choice}", choice)
+        for choice in choices
+    ]
+
+    choice = fzf_select_value(options, "update cycle> ")
+    if choice is None:
         raise SystemExit(EXIT_OK)
-
-    choice = result.lstrip("* ").strip()
 
     if choice == "custom":
         if sys.stdin.isatty():
@@ -695,33 +1587,50 @@ def cmd_sub_cycle(args):
 
     # Parse interval to systemd format
     # Supported: Xm, Xh, Xd
-    if not choice.endswith(("m", "h", "d")):
-        die("interval must end with m (minutes), h (hours), or d (days)", EXIT_INVALID_INPUT)
+    if not re.fullmatch(r"[1-9][0-9]*[mhd]", choice):
+        die("interval must look like 30m, 2h, or 1d", EXIT_INVALID_INPUT)
 
     # Update timer unit
-    timer_path = "/etc/systemd/system/mihomo-update.timer"
-    try:
-        with open(timer_path, "r") as f:
-            content = f.read()
-
-        import re
-        new_content = re.sub(
+    with operation_lock():
+        try:
+            content = TIMER_UNIT.read_text(encoding="utf-8")
+        except OSError as error:
+            die(f"cannot read {TIMER_UNIT}: {error}", EXIT_GENERAL)
+        new_content, replacements = re.subn(
             r"OnUnitActiveSec=.*",
             f"OnUnitActiveSec={choice}",
-            content
+            content,
+            count=1,
         )
+        if replacements != 1:
+            die(f"OnUnitActiveSec not found in {TIMER_UNIT}", EXIT_INVALID_INPUT)
 
-        with open(timer_path, "w") as f:
-            f.write(new_content)
+        was_active = subprocess.run(
+            [SYSTEMCTL, "is-active", "--quiet", "mihomo-update.timer"]
+        ).returncode == 0
+        atomic_write_text(TIMER_UNIT, new_content, mode=0o644)
+        try:
+            subprocess.run([SYSTEMCTL, "daemon-reload"], check=True)
+            if was_active:
+                subprocess.run(
+                    [SYSTEMCTL, "restart", "mihomo-update.timer"], check=True
+                )
+        except Exception as error:
+            try:
+                atomic_write_text(TIMER_UNIT, content, mode=0o644)
+                subprocess.run([SYSTEMCTL, "daemon-reload"], check=True)
+                if was_active:
+                    subprocess.run(
+                        [SYSTEMCTL, "restart", "mihomo-update.timer"], check=True
+                    )
+            except Exception as rollback_error:
+                print(
+                    f"warning: timer rollback failed: {rollback_error}",
+                    file=sys.stderr,
+                )
+            die(f"failed to update timer: {error}", EXIT_GENERAL)
 
-        # Reload systemd and restart timer
-        subprocess.run(["systemctl", "daemon-reload"], check=True)
-        if subprocess.run(["systemctl", "is-active", "--quiet", "mihomo-update.timer"]).returncode == 0:
-            subprocess.run(["systemctl", "restart", "mihomo-update.timer"], check=True)
-
-        print(f"  update cycle set to: {choice}")
-    except Exception as e:
-        die(f"failed to update timer: {e}", EXIT_GENERAL)
+    print(f"  update cycle set to: {choice}")
 
 
 def cmd_logs(args):
@@ -732,188 +1641,6 @@ def cmd_logs(args):
         return
 
 
-def cmd_dns_set(args):
-    need_root("configuring DNS settings")
-
-    state = read_state()
-    dns_overrides = state.get("dns", {})
-
-    def load_base_dns():
-        base = load_yaml(BASE_CFG) if BASE_CFG.exists() else {}
-        return base.get("dns", {})
-
-    base_dns = load_base_dns()
-
-    def show_dns():
-        current_mode = dns_overrides.get("enhanced-mode", base_dns.get("enhanced-mode", "redir-host"))
-        current_ns = dns_overrides.get("nameservers", base_dns.get("nameserver", []))
-        current_fb = dns_overrides.get("fallback", base_dns.get("fallback", []))
-
-        def fmt(val):
-            if isinstance(val, list):
-                if not val:
-                    return "[]"
-                return str(val)
-            return str(val) if val is not None else "?"
-
-        print("\033[1m── DNS Settings (base.yaml) ──\033[0m")
-        print(f"  enhanced-mode:           {base_dns.get('enhanced-mode', '?')}")
-        print(f"  ipv6:                    {fmt(base_dns.get('ipv6'))}")
-        print(f"  fake-ip-range:           {fmt(base_dns.get('fake-ip-range'))}")
-        print(f"  fake-ip-filter:          {fmt(base_dns.get('fake-ip-filter'))}")
-        print(f"  default-nameserver:      {fmt(base_dns.get('default-nameserver'))}")
-        print(f"  proxy-server-nameserver: {fmt(base_dns.get('proxy-server-nameserver'))}")
-        print(f"  direct-nameserver:       {fmt(base_dns.get('direct-nameserver'))}")
-        print()
-        print("\033[1m── Effective (with overrides) ──\033[0m")
-        print(f"  enhanced-mode:  {current_mode}")
-        print("  nameservers:")
-        if current_ns:
-            for i, ns in enumerate(current_ns, 1):
-                print(f"    {i}) {ns}")
-        else:
-            print("    (empty)")
-        print("  fallback:")
-        if current_fb:
-            for i, fb in enumerate(current_fb, 1):
-                print(f"    {i}) {fb}")
-        else:
-            print("    (empty)")
-        print()
-        print("\033[1m── Configure ─────────────\033[0m")
-        print("  1) Enhanced mode")
-        print("  2) Nameservers")
-        print("  3) Fallback servers")
-        print("  4) Reset to base.yaml")
-        print("  5) Apply & save")
-        print("  6) Cancel")
-
-    def edit_list(label, items):
-        while True:
-            print(f"\n\033[1m── {label} ──\033[0m")
-            if items:
-                for i, item in enumerate(items, 1):
-                    print(f"    {i}) {item}")
-            else:
-                print("    (empty)")
-            print()
-            print("    a) Add")
-            print("    r) Remove by number")
-            print("    e) Edit by number")
-            print("    b) Back")
-
-            choice = input(f"\n  {label} [a/r/e/b]: ").strip().lower()
-
-            if choice == "a":
-                url = input("  Enter URL: ").strip()
-                if not url:
-                    print("  \033[31mempty URL\033[0m")
-                    continue
-                if not url.startswith(("http://", "https://", "tls://")):
-                    print("  \033[31mURL must start with http://, https://, or tls://\033[0m")
-                    continue
-                items.append(url)
-                print(f"  \033[32madded: {url}\033[0m")
-
-            elif choice == "r":
-                if not items:
-                    print("  \033[33mlist is empty\033[0m")
-                    continue
-                try:
-                    num = int(input("  Remove number: ")) - 1
-                    if 0 <= num < len(items):
-                        removed = items.pop(num)
-                        print(f"  \033[32mremoved: {removed}\033[0m")
-                    else:
-                        print("  \033[31minvalid number\033[0m")
-                except (ValueError, EOFError):
-                    print("  \033[31minvalid input\033[0m")
-
-            elif choice == "e":
-                if not items:
-                    print("  \033[33mlist is empty\033[0m")
-                    continue
-                try:
-                    num = int(input("  Edit number: ")) - 1
-                    if 0 <= num < len(items):
-                        old = items[num]
-                        new_url = input(f"  New URL [{old}]: ").strip()
-                        if new_url:
-                            if not new_url.startswith(("http://", "https://", "tls://")):
-                                print("  \033[31mURL must start with http://, https://, or tls://\033[0m")
-                                continue
-                            items[num] = new_url
-                            print(f"  \033[32mchanged: {old} -> {new_url}\033[0m")
-                        else:
-                            print("  unchanged")
-                    else:
-                        print("  \033[31minvalid number\033[0m")
-                except (ValueError, EOFError):
-                    print("  \033[31minvalid input\033[0m")
-
-            elif choice == "b":
-                return items
-
-            else:
-                print("  \033[31minvalid choice\033[0m")
-
-    while True:
-        show_dns()
-
-        try:
-            choice = input("\n  Select [1-6]: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\n  cancelled")
-            return
-
-        if choice == "1":
-            items = [
-                "redir-host (default, recommended)",
-                "fake-ip (faster, some apps may not work)"
-            ]
-            result = fzf_select(items, "enhanced-mode> ")
-            if result:
-                if "redir-host" in result:
-                    dns_overrides["enhanced-mode"] = "redir-host"
-                else:
-                    dns_overrides["enhanced-mode"] = "fake-ip"
-                print(f"  \033[32menhanced-mode: {dns_overrides['enhanced-mode']}\033[0m")
-
-        elif choice == "2":
-            current_ns = dns_overrides.get("nameservers", base_dns.get("nameserver", []))
-            ns = list(current_ns)
-            edit_list("Nameservers", ns)
-            dns_overrides["nameservers"] = ns
-
-        elif choice == "3":
-            current_fb = dns_overrides.get("fallback", base_dns.get("fallback", []))
-            fb = list(current_fb)
-            edit_list("Fallback servers", fb)
-            dns_overrides["fallback"] = fb
-
-        elif choice == "4":
-            state.pop("dns", None)
-            dns_overrides = {}
-            base_dns = load_base_dns()
-            print("  \033[32mDNS reset to base.yaml defaults\033[0m")
-
-        elif choice == "5":
-            if dns_overrides:
-                state["dns"] = dns_overrides
-            else:
-                state.pop("dns", None)
-            write_state(state)
-            print("\n  \033[32mDNS settings saved.\033[0m Run: sudo mihomoctl restart")
-            return
-
-        elif choice == "6":
-            print("  cancelled")
-            return
-
-        else:
-            print("  \033[31minvalid choice\033[0m")
-
-
 def main():
     p = argparse.ArgumentParser(prog="mihomoctl")
 
@@ -921,21 +1648,48 @@ def main():
 
     sub.add_parser("status").set_defaults(fn=cmd_status)
 
-    n = sub.add_parser("node")
-    nsub = n.add_subparsers(dest="node_cmd", required=True)
-    nsub.add_parser("group").set_defaults(fn=cmd_node_group)
-    nsub.add_parser("pick").set_defaults(fn=cmd_node_pick)
+    group = sub.add_parser("group")
+    group_sub = group.add_subparsers(dest="group_cmd", required=True)
+    group_list = group_sub.add_parser("list")
+    group_list.add_argument("--all", action="store_true")
+    group_list.set_defaults(fn=cmd_group_list)
+    group_show = group_sub.add_parser("show")
+    group_show.add_argument("group")
+    group_show.set_defaults(fn=cmd_group_show)
+    group_select = group_sub.add_parser("select")
+    group_select.add_argument("group")
+    group_select.add_argument("member")
+    group_select.set_defaults(fn=cmd_group_select)
+    group_pin = group_sub.add_parser("pin")
+    group_pin.add_argument("group")
+    group_pin.add_argument("member")
+    group_pin.set_defaults(fn=cmd_group_pin)
+    group_unpin = group_sub.add_parser("unpin")
+    group_unpin.add_argument("group")
+    group_unpin.set_defaults(fn=cmd_group_unpin)
 
-    test_parser = nsub.add_parser("test")
-    test_parser.add_argument("--all", action="store_true")
-    test_parser.set_defaults(fn=cmd_node_test)
+    route = sub.add_parser("route")
+    route_sub = route.add_subparsers(dest="route_cmd", required=True)
+    route_status = route_sub.add_parser("status")
+    route_status.add_argument("roots", nargs="*")
+    route_status.set_defaults(fn=cmd_route_status)
+    route_pick = route_sub.add_parser("pick")
+    route_pick.add_argument("root", nargs="?")
+    route_pick.set_defaults(fn=cmd_route_pick)
+
+    proxy = sub.add_parser("proxy")
+    proxy_sub = proxy.add_subparsers(dest="proxy_cmd", required=True)
+    proxy_test = proxy_sub.add_parser("test")
+    proxy_test.add_argument("targets", nargs="+")
+    proxy_test.add_argument("--all", action="store_true")
+    proxy_test.set_defaults(fn=cmd_proxy_test)
 
     sub.add_parser("enable").set_defaults(fn=cmd_enable)
     sub.add_parser("disable").set_defaults(fn=cmd_disable)
 
-    m = sub.add_parser("mode")
-    m.add_argument("value", nargs="?")
-    m.set_defaults(fn=cmd_mode)
+    mode = sub.add_parser("mode")
+    mode.add_argument("value", nargs="?", choices=("tun", "proxy", "inherit"))
+    mode.set_defaults(fn=cmd_mode)
 
     s = sub.add_parser("sub")
     ssub = s.add_subparsers(dest="sub_cmd", required=True)
@@ -953,13 +1707,40 @@ def main():
     sub.add_parser("restart").set_defaults(fn=cmd_restart)
     sub.add_parser("logs").set_defaults(fn=cmd_logs)
 
-    d = sub.add_parser("dns")
-    dsub = d.add_subparsers(dest="dns_cmd", required=True)
-    ds = dsub.add_parser("set")
-    ds.set_defaults(fn=cmd_dns_set)
+    rules = sub.add_parser("rules")
+    rules_sub = rules.add_subparsers(dest="rules_cmd", required=True)
+    rules_sub.add_parser("list").set_defaults(fn=cmd_rules_list)
+    rules_add = rules_sub.add_parser("add")
+    rules_add.add_argument("rules", nargs="+")
+    rules_add.set_defaults(fn=cmd_rules_add)
+    rules_sub.add_parser("clear").set_defaults(fn=cmd_rules_clear)
 
     args = p.parse_args()
-    args.fn(args)
+    try:
+        args.fn(args)
+    except urllib.error.HTTPError as error:
+        code = error.code
+        error.close()
+        if code in {401, 403}:
+            die(
+                "mihomo API authentication failed; regenerate config with sudo mihomoctl restart",
+                EXIT_AUTH_FAILED,
+            )
+        die(f"mihomo API request failed with HTTP {code}", EXIT_API_DOWN)
+    except urllib.error.URLError as error:
+        die(f"mihomo API is unavailable: {error.reason}", EXIT_API_DOWN)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        die(f"mihomo API returned an invalid response: {error}", EXIT_API_DOWN)
+    except subprocess.CalledProcessError as error:
+        command = error.cmd if isinstance(error.cmd, str) else " ".join(error.cmd)
+        die(f"command failed with exit {error.returncode}: {command}", EXIT_GENERAL)
+    except FileNotFoundError as error:
+        die(f"required file or command not found: {error}", EXIT_DEPENDENCY)
+    except PermissionError as error:
+        die(f"permission denied: {error}", EXIT_DEPENDENCY)
+    except KeyboardInterrupt:
+        print(file=sys.stderr)
+        raise SystemExit(130)
 
 
 if __name__ == "__main__":
