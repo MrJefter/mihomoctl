@@ -1,5 +1,7 @@
 [Unit]
 Description=Update mihomo subscription config
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=oneshot
