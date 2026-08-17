@@ -2,31 +2,31 @@
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
-Однострочный CLI для Mihomo на Linux. Вставьте ссылку на подписку, выберите ноду — и вы онлайн.
+Консольная утилита для установки и управления [Mihomo](https://wiki.metacubex.one/) (Clash-meta) в Linux. Вставьте ссылку на подписку, выберите маршруты и ноды — и вы в сети.
 
 [English version](README.md)
 
 ## Что это?
 
-mihomoctl устанавливает и управляет [Mihomo](https://wiki.metacubex.one/) (Clash-meta) на любой Linux-системе с systemd. Одна команда ставит всё — бинарник, сервис, таймер обновления. Вставляете ссылку на подписку, fzf выбирает ноду — и вы в сети.
+mihomoctl автоматизирует установку и настройку Mihomo в Linux с systemd. Одной командой ставится всё: бинарный файл, сервисы, автодополнения для терминала и таймер автообновления подписки.
 
-Работает с любой Mihomo-совместимой подпиской (Remnawave, RoscomVPN или ваш провайдер).
+Подходит для любых подписок формата Mihomo / Clash (Remnawave, RoscomVPN или собственные конфигурации).
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/Jefter5549/mihomoctl/master/install.sh | sudo bash
 ```
 
 ## Быстрый старт
 
-**Установка или обновление (всё одной командой):**
+**Установка или обновление в одну команду:**
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh?v=$(date +%s)" | sudo bash
+curl -fsSL "https://raw.githubusercontent.com/Jefter5549/mihomoctl/master/install.sh?v=$(date +%s)" | sudo bash
 ```
 
-Установщик определяет пакетный менеджер, ставит Python + PyYAML, скачивает последний бинарник mihomo, копирует все файлы и спрашивает, скачать ли шаблон маршрутизации RoscomVPN.
+Установщик определяет пакетный менеджер (apt в Debian/Ubuntu, dnf в Fedora, pacman в Arch, zypper, apk), ставит зависимости (`python3`, `python3-yaml`, `curl`, `gzip`), скачивает свежий бинарник mihomo, копирует скрипты, автодополнения и systemd-юниты, а также предлагает скачать готовый шаблон маршрутизации RoscomVPN.
 
-**Установите подписку и запуститесь:**
+**Настройка подписки и запуск:**
 
 ```bash
 sudo mihomoctl sub set <ваша-ссылка-на-подписку>
@@ -34,10 +34,10 @@ sudo mihomoctl sub update
 sudo mihomoctl enable
 ```
 
-**Удалить всё:**
+**Полное удаление:**
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh?v=$(date +%s)" | sudo bash -s -- --remove
+curl -fsSL "https://raw.githubusercontent.com/Jefter5549/mihomoctl/master/install.sh?v=$(date +%s)" | sudo bash -s -- --remove
 ```
 
 ## Содержание
@@ -48,55 +48,46 @@ curl -fsSL "https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.
 - [Шаблон маршрутизации](#шаблон-маршрутизации)
 - [Команды](#команды)
 - [Конфигурация](#конфигурация)
-- [Systemd-юниты](#systemd-юниты)
-- [Структура файлов](#структура-файлов-после-установки)
+- [Systemd сервисы](#systemd-сервисы)
+- [Файловая структура](#файловая-структура-после-установки)
 - [Обновление](#обновление)
 - [Удаление](#удаление)
-- [Решение проблем](#решение-проблем)
-- [См. также](#см-также)
+- [Ссылки](#ссылки)
 - [Лицензия](#лицензия)
 
 ## Возможности
 
-- **Однокомандная установка** — определяет apt/dnf/pacman, ставит всё
-- **Управление подпиской** — установка URL, автообновление по таймеру, настройка цикла
-- **Интерактивный выбор** — fzf-пикеры для нод/групп (нумерованный список без fzf)
-- **DNS-редактор** — все поля DNS, переопределение nameservers/fallback, сброс к дефолтам подписки
-- **Пинг нод** — проверка отдельных нод или всех нод в группе
-- **Смена режима** — переключение между TUN (полный системный прокси) и proxy
-- **Управление сервисом** — включение/выключение/перезапуск mihomo из CLI
-- **Пersistentность** — DNS-переопределения сохраняются через обновления подписки
+- **Установка в одну команду** — поддержка apt, dnf, pacman, zypper, apk.
+- **Управление подпиской** — загрузка, ручное и автоматическое обновление через systemd timer.
+- **Интерактивный выбор маршрутов и нод** — удобный выбор через fzf (с текстовым меню, если fzf не установлен).
+- **Контроль групп политик (policy groups)** — просмотр, выбор прокси, фиксация (pin) серверов для URLTest/Fallback.
+- **Тестирование задержки (ping)** — как для отдельных прокси, так и для всех нод группы.
+- **Переключение режима перехвата трафика** — TUN (весь трафик системы), proxy (только mixed-port) или inherit (наследовать из подписки).
+- **Динамические правила** — просмотр, быстрое добавление пользовательских правил маршрутизации на лету.
+- **Автодополнение в шелле** — готовые автодополнения для bash, zsh и fish.
 
 ## Требования
 
-- Linux с systemd
-- Python 3
+- Linux с systemd (Debian 12/13, Ubuntu, Fedora, Arch Linux и др.)
+- Python >= 3.10
 - PyYAML (`python3-yaml`)
-- fzf (опционально, для интерактивных пикеров)
+- fzf (опционально, для интерактивного меню)
 
 ## Установка
 
 ### Полная установка (рекомендуется)
 
 ```bash
-git clone https://github.com/MrJefter/mihomoctl.git
+git clone https://github.com/Jefter5549/mihomoctl.git
 cd mihomoctl
 sudo make install
 sudo ./install.sh
 ```
 
-Установщик:
-1. Определит пакетный менеджер и поставит `python3` + `python3-yaml`
-2. Скачает последний бинарник mihomo
-3. Скопирует mihomoctl, systemd-юниты и вспомогательные скрипты
-4. Спросит, скачать ли шаблон маршрутизации RoscomVPN
-
 ### Ручная установка
 
-Если предпочитаете ставить зависимости вручную:
-
 ```bash
-sudo make install    # только копирует файлы
+sudo make install    # копирует бинарники, автодополнения и сервисы
 sudo mihomoctl sub set
 sudo mihomoctl sub update
 sudo mihomoctl enable
@@ -104,218 +95,117 @@ sudo mihomoctl enable
 
 ## Шаблон маршрутизации
 
-При установке будет вопрос:
+Во время установки будет предложено:
 
 ```
 Download RoscomVPN routing template? [Y/n]
 ```
 
-Это скачает готовый конфиг из [hydraponique/roscomvpn-routing](https://github.com/hydraponique/roscomvpn-routing) с:
+Скачивается оптимизированный шаблон из [hydraponique/roscomvpn-routing](https://github.com/hydraponique/roscomvpn-routing):
 
-- Преднастроенными группами прокси (VPN, YouTube, Discord, Игры и т.д.)
-- 40+ рулсетами для маршрутизации РФ/РБ
-- Провайдерами правил для блокировки рекламы, шпионского ПО Windows, торрентов
-- Прямым доступом для RU/BY-сервисов
-
-Если откажетесь, нужно будет вставить свою ссылку на подписку:
-
-```bash
-sudo mihomoctl sub set <ваша-ссылка>
-sudo mihomoctl sub update
-```
+- Готовые группы прокси (VPN, YouTube, Discord, Games и др.)
+- 40+ наборов правил для РФ/РБ маршрутизации
+- Блокировка рекламы, телеметрии и трекеров
+- Прямой доступ к локальным и государственным сервисам
 
 ## Команды
 
-### Выбор ноды и группы
+### Статус и управление сервисом
 
 ```bash
-mihomoctl node group       # fzf: выбор группы → выбор ноды в ней
-mihomoctl node pick        # fzf: быстрый выбор ноды в основной группе
-mihomoctl node test        # пинг текущей ноды
-mihomoctl node test --all  # пинг всех нод в основной группе
+mihomoctl status           # статус демона, подписки, режима и соединений
+sudo mihomoctl enable      # включить и запустить службу mihomo
+sudo mihomoctl disable     # остановить и отключить службу
+sudo mihomoctl restart     # перезапустить службу
+mihomoctl logs             # просмотр логов mihomo (journalctl)
+```
+
+### Маршруты и группы
+
+```bash
+mihomoctl group list [--all]               # список групп политик
+mihomoctl group show <group>               # детальная информация о группе
+mihomoctl group select <group> <member>    # выбрать сервер в группе Selector
+mihomoctl group pin <group> <member>       # зафиксировать сервер для URLTest/Fallback
+mihomoctl group unpin <group>              # вернуть автовыбор по задержке
+mihomoctl route status [roots...]          # текущий активный маршрут
+mihomoctl route pick [root]                # интерактивный выбор вложенного маршрута (fzf)
+```
+
+### Тестирование прокси
+
+```bash
+mihomoctl proxy test <target>              # тест задержки конкретного прокси/узла
+mihomoctl proxy test <group> --all         # тест всех узлов в группе
+```
+
+### Режим перехвата трафика
+
+```bash
+mihomoctl mode                             # текущий режим
+sudo mihomoctl mode tun                    # включить TUN (полный перехват трафика ОС)
+sudo mihomoctl mode proxy                  # режим proxy (только mixed-port)
+sudo mihomoctl mode inherit                # наследовать настройку TUN из подписки
 ```
 
 ### Управление подпиской
 
 ```bash
-mihomoctl sub set [url]    # установить URL подписки (промпт если без аргумента)
-mihomoctl sub update       # скачать конфиг, перегенерировать, перезапустить
-mihomoctl sub cycle        # изменить интервал автообновления (1ч–24ч или свой)
+sudo mihomoctl sub set [url]               # задать ссылку на подписку
+sudo mihomoctl sub update                  # скачать подписку, сгенерировать конфиг и применить
+sudo mihomoctl sub cycle                   # настроить интервал таймера автообновления
 ```
 
-### DNS-настройки
+### Динамические правила
 
 ```bash
-mihomoctl dns set          # интерактивный DNS-редактор
+mihomoctl rules list                       # список активных правил
+sudo mihomoctl rules add <rule...>         # добавить правило (например, 'DOMAIN-SUFFIX,example.com,DIRECT')
+sudo mihomoctl rules clear                 # очистить добавленные вручную правила
 ```
 
-Показывает все DNS-поля из подписки (enhanced-mode, nameservers, fallback, default-nameserver, proxy-server-nameserver и т.д.). Переопределите любое поле или сбросьте к дефолтам подписки. DNS-переопределения сохраняются через обновления подписки.
-
-### Управление сервисом
-
-```bash
-mihomoctl enable           # systemctl enable --now mihomo.service
-mihomoctl disable          # systemctl disable --now mihomo.service
-mihomoctl restart          # systemctl restart mihomo.service
-mihomoctl status           # сервис, подписка, маршрутизация, сеть
-mihomoctl logs             # tail -f journalctl -u mihomo.service
-```
-
-### Смена режима
-
-```bash
-mihomoctl mode             # показать текущий режим
-mihomoctl mode tun         # TUN (полный системный прокси)
-mihomoctl mode proxy       # proxy (только для приложений)
-```
-
-## Конфигурация
-
-### Как это работает
-
-mihomoctl использует двухфайловую схему:
-
-```
-base.yaml → (generate_config) → config.yaml
-```
-
-- **`base.yaml`** — шаблон подписки или конфиг RoscomVPN. Скачивается через `sub update` или при установке. **Не редактировать напрямую.**
-- **`config.yaml`** — генерируемый конфиг для запуска. Модифицируется `generate_config()` на основе режима (TUN/proxy). Также **не редактировать напрямую.**
-
-Процесс:
-1. `sub update` скачивает подписку в `base.yaml`
-2. `generate_config()` читает `base.yaml`, применяет runtime-настройки (режим, порты, DNS, TUN), пишет `config.yaml`
-3. Mihomo читает `config.yaml` при старте
-
-### Своя подписка
-
-Если у вас есть подписка Mihomo/Clash (от любого провайдера):
-
-```bash
-sudo mihomoctl sub set https://ваша-ссылка-на-подписку
-sudo mihomoctl sub update
-sudo mihomoctl enable
-```
-
-### Без RoscomVPN
-
-Откажитесь от шаблона RoscomVPN при установке, затем вставьте свою подписку. Инструмент работает с любой Mihomo-совместимой подпиской.
-
-## Systemd-юниты
+## Systemd сервисы
 
 | Юнит | Назначение |
 |---|---|
-| `mihomo.service` | Демон Mihomo |
-| `mihomo-update.service` | Разовое обновление подписки (по таймеру) |
-| `mihomo-update.timer` | Периодическое обновление (каждые 6 часов) |
+| `mihomo.service` | Основной демон Mihomo |
+| `mihomo-update.service` | Обновление конфигурации подписки |
+| `mihomo-update.timer` | Таймер периодического обновления подписки |
 
-Включение после установки:
-
-```bash
-sudo mihomoctl enable
-sudo systemctl enable --now mihomo-update.timer  # опционально, автообновление подписки
-```
-
-## Структура файлов после установки
+## Файловая структура после установки
 
 ```
-/usr/local/bin/mihomoctl              # основной CLI
-/usr/local/bin/mihomo                 # бинарник mihomo (скачивается install.sh)
-/usr/local/sbin/mihomo-update-config  # обёртка для sub update
-/etc/mihomo/base.yaml                 # шаблон подписки (не редактировать)
-/etc/mihomo/config.yaml               # генерируемый конфиг (не редактировать)
+/usr/local/bin/mihomoctl                            # исполняемый файл CLI
+/usr/local/bin/mihomo                               # бинарник mihomo core
+/usr/local/sbin/mihomo-update-config                # скрипт вызова обновления
+/etc/bash_completion.d/mihomoctl                    # автодополнение bash
+/usr/share/zsh/site-functions/_mihomoctl            # автодополнение zsh
+/usr/share/fish/vendor_completions.d/mihomoctl.fish # автодополнение fish
+/etc/mihomo/base.yaml                               # шаблон / подписка
+/etc/mihomo/config.yaml                             # сгенерированный рабочий конфиг
 /etc/systemd/system/mihomo.service
 /etc/systemd/system/mihomo-update.service
 /etc/systemd/system/mihomo-update.timer
-/var/lib/mihomoctl/state.json         # сохранённый выбор группы/ноды/режима
+/var/lib/mihomoctl/state.json                       # сохраненные настройки и оверрайды
 ```
 
 ## Обновление
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh?v=$(date +%s)" | sudo bash
+curl -fsSL "https://raw.githubusercontent.com/Jefter5549/mihomoctl/master/install.sh?v=$(date +%s)" | sudo bash
 ```
-
-Или вручную:
-
-```bash
-cd ~/.local/share/mihomoctl
-git pull
-sudo make install
-sudo mihomoctl restart
-```
-
-Тянет последний код и переустанавливает файлы. Конфиг и состояние сохраняются.
 
 ## Удаление
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MrJefter/mihomoctl/master/install.sh | sudo bash -s -- --remove
+curl -fsSL "https://raw.githubusercontent.com/Jefter5549/mihomoctl/master/install.sh?v=$(date +%s)" | sudo bash -s -- --remove
 ```
 
-Или вручную:
+## Ссылки
 
-```bash
-sudo make uninstall
-sudo rm -rf /etc/mihomo /var/lib/mihomoctl ~/.local/share/mihomoctl
-```
-
-## Решение проблем
-
-### Mihomo не запускается
-
-Проверьте бинарник и валидность конфига:
-
-```bash
-/usr/local/bin/mihomo -t -d /etc/mihomo    # тест конфига
-sudo mihomoctl logs                          # проверить логи
-```
-
-### API не отвечает
-
-Для большинства команд Mihomo должен быть запущен. Проверьте:
-
-```bash
-sudo mihomoctl status
-systemctl status mihomo.service
-```
-
-Если API показывает "down", перезапустите mihomo:
-
-```bash
-sudo mihomoctl restart
-```
-
-### fzf не найден
-
-Установите fzf для интерактивных пикеров:
-
-```bash
-# Debian/Ubuntu
-sudo apt install fzf
-
-# Fedora
-sudo dnf install fzf
-
-# Arch
-sudo pacman -S fzf
-```
-
-Без fzf команды используют нумерованные списки.
-
-### Permission denied
-
-Большинство команд требуют root. Используйте `sudo`:
-
-```bash
-sudo mihomoctl enable
-sudo mihomoctl sub update
-```
-
-## См. также
-
-[vika2603/mihomoctl](https://github.com/vika2603/mihomoctl) — Go-based CLI для продвинутого управления через API: мониторинг соединений в реальном времени, отладка DNS, проверка здоровья proxy-providers, инспекция правил и JSON-вывод для скриптов. Используйте оба: этот проект для настройки, vika2603 для отладки.
+- [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) — ядро Mihomo
+- [hydraponique/roscomvpn-routing](https://github.com/hydraponique/roscomvpn-routing) — правила и шаблоны маршрутизации
 
 ## Лицензия
 
-[GPL-3.0](LICENSE)
+GPL-3.0
